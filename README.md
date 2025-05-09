@@ -8,7 +8,8 @@ A simple GUI application that uses OpenAI's Whisper model to transcribe audio fi
 - Supports various audio formats (WAV, MP3, MPEG, MP4, M4A)
 - Includes timestamps for each segment of speech
 - Multiple Whisper model options (tiny to large-v3)
-- Real-time transcription display
+- Real-time status updates and progress information
+- Detailed transcription statistics
 - Saves transcriptions to text files
 
 ## Installation
@@ -59,7 +60,7 @@ python transcribe_gui.py
    - Select your preferred Whisper model from the dropdown
    - Choose whether to include timestamps
    - Click "Select Audio Files" to choose your audio files
-   - Watch the transcriptions appear in real-time
+   - Watch the status updates and transcriptions appear in real-time
 
 4. When you're done, you can deactivate the virtual environment:
 ```bash
@@ -68,12 +69,37 @@ deactivate
 
 ## Models
 
-Available Whisper models (from fastest to most accurate):
-- tiny: ~75MB (compressed), ~1GB (in memory), fastest, least accurate
-- base: ~142MB (compressed), ~1GB (in memory), good balance of speed and accuracy
-- small: ~466MB (compressed), ~2GB (in memory), better accuracy, slower
-- medium: ~1.5GB (compressed), ~5GB (in memory), high accuracy, slower
-- large-v3: ~3GB (compressed), ~10GB (in memory), best accuracy, slowest (default)
+Available Whisper models with their characteristics and recommended use cases:
+
+### tiny (~75MB download, ~1GB in memory)
+- Fastest model, least accurate
+- Best for: Quick transcriptions, short audio, clear speech
+- Recommended for: English-only content, simple audio
+- Processing speed: ~2-3x real-time
+
+### base (~142MB download, ~1GB in memory)
+- Good balance of speed and accuracy
+- Best for: General purpose transcription
+- Recommended for: Most everyday transcription needs
+- Processing speed: ~1.5-2x real-time
+
+### small (~466MB download, ~2GB in memory)
+- Better accuracy, supports multiple languages
+- Best for: Multiple languages, moderate accuracy needed
+- Recommended for: International content, mixed language audio
+- Processing speed: ~1-1.5x real-time
+
+### medium (~1.5GB download, ~5GB in memory)
+- High accuracy, good for complex audio
+- Best for: Complex audio, multiple speakers
+- Recommended for: Professional content, interviews, meetings
+- Processing speed: ~0.7-1x real-time
+
+### large-v3 (~3GB download, ~10GB in memory)
+- Best accuracy, professional quality
+- Best for: Professional use, maximum accuracy
+- Recommended for: Critical content, complex audio, multiple speakers
+- Processing speed: ~0.5-0.7x real-time
 
 Models are stored locally in the `models` directory next to the script. The download only happens once per model.
 
@@ -84,23 +110,33 @@ Transcription time varies based on several factors:
 - Audio length: Longer files take proportionally longer to process
 - CPU/GPU: Processing speed depends on your hardware
 
-Approximate transcription speeds (on CPU):
-- tiny: ~2-3x real-time (e.g., 1 minute of audio takes 20-30 seconds)
-- base: ~1.5-2x real-time
-- small: ~1-1.5x real-time
-- medium: ~0.7-1x real-time
-- large-v3: ~0.5-0.7x real-time (e.g., 1 minute of audio takes 1.5-2 minutes)
-
 For example:
 - A 5-minute audio file using the large-v3 model might take 7-10 minutes to transcribe
 - The same file using the tiny model might take 2-3 minutes but with lower accuracy
 
-Note: These are approximate times and may vary based on your system's specifications and the complexity of the audio content.
+## Status Updates
+
+The application provides detailed status information during transcription:
+- Audio file length and duration
+- Selected model and estimated processing time
+- Number of speech segments detected
+- Progress through multiple files (if selected)
+- Clear indication when transcription is complete
+- Location of saved transcription files
+
+## Output Format
+
+Transcriptions are saved as text files with the following information:
+- File name and total duration
+- Number of speech segments
+- Timestamps for each segment (if enabled)
+- Full transcription text
+- Saved in the same directory as the source audio file
 
 ## Notes
 
 - The large-v3 model (~3GB download, ~10GB in memory) is downloaded during installation
 - Models are stored in the `models` directory in the same folder as the script
 - Transcriptions are saved in the same directory as the source audio files
-- The virtual environment (`.venv`) contains all required Python packages # whispr-batch
-# whispr-batch
+- The virtual environment (`.venv`) contains all required Python packages
+- The application shows detailed status updates but cannot show real-time progress during transcription
