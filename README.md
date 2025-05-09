@@ -1,181 +1,145 @@
-# Audio Transcription App
+# Audio Transcription Tool
 
-A simple GUI application that uses OpenAI's Whisper model to transcribe audio files. Select your files, choose your options, and get transcriptions with timestamps.
+A Python-based GUI application for transcribing audio files using OpenAI's Whisper model. This tool provides a user-friendly interface for batch processing audio files with flexible settings and real-time progress tracking.
 
 ## Features
 
-- Simple GUI interface for file selection
-- Supports various audio formats (WAV, MP3, MPEG, MP4, M4A)
-- Includes timestamps for each segment of speech
-- Multiple Whisper model options (tiny to large-v3)
-- Real-time status updates and progress information
-- Detailed transcription statistics
-- Saves transcriptions to text files
-- Pause/Resume and Stop functionality
-- Flexible file queue management
-- Per-file timestamp control
-- File reordering and removal
+- **Multiple Model Support**: Choose from different Whisper models (tiny, base, small, medium, large-v3) based on your needs
+- **Batch Processing**: Process multiple audio files in a queue
+- **Flexible File Management**:
+  - Add files at any time (even during processing when paused)
+  - Drag and drop to reorder files in the queue
+  - Remove files from the queue
+  - Individual model selection for each file
+  - Individual timestamp settings for each file
+- **Processing Controls**:
+  - Start/Pause/Resume/Stop functionality
+  - Real-time progress tracking
+  - Estimated time remaining
+  - Pause to add more files
+- **Output Options**:
+  - Optional timestamps for each segment
+  - Saves transcriptions in the same directory as source files
+  - Clear progress and status updates
+
+## Requirements
+
+- Python 3.8 or higher
+- FFmpeg installed on your system
+- Required Python packages (install via `pip install -r requirements.txt`):
+  - openai-whisper
+  - tkinter
+  - librosa
+  - numpy
+  - torch
 
 ## Installation
 
-1. Install Python 3.10 and tkinter:
-```bash
-brew install python@3.10 python-tk@3.10
-```
+1. Clone this repository:
+   ```bash
+   git clone [repository-url]
+   cd [repository-name]
+   ```
 
-2. Set up the virtual environment:
-```bash
-# Create and activate virtual environment
-python3.10 -m venv .venv
-source .venv/bin/activate
+2. Create and activate a virtual environment:
+   ```bash
+   # Create virtual environment
+   python -m venv venv
 
-# Upgrade pip (using python -m pip to ensure we use the right pip)
-python -m pip install --upgrade pip
+   # Activate virtual environment
+   # On macOS/Linux:
+   source venv/bin/activate
+   # On Windows:
+   .\venv\Scripts\activate
+   ```
 
-# Install requirements
-python -m pip install -r requirements.txt
-```
+3. Install required packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-3. Download the Whisper model (large-v3, ~10GB):
-```bash
-# Create models directory
-mkdir -p models
+4. Ensure FFmpeg is installed on your system:
+   - macOS: `brew install ffmpeg`
+   - Ubuntu/Debian: `sudo apt-get install ffmpeg`
+   - Windows: Download from [FFmpeg website](https://ffmpeg.org/download.html)
 
-# Download the model with progress bar (this may take a while depending on your internet speed)
-python -c "from tqdm import tqdm; import whisper; print('Downloading large-v3 model (this may take a while)...'); model = whisper.load_model('large-v3', download_root='models', in_memory=False)"
+## Running the Application
 
-# Verify the model was downloaded (should show the model path)
-python -c "import whisper; print('Model location:', whisper._download(whisper._MODELS['large-v3'], 'models', in_memory=False))"
-```
+1. Make sure you're in the project directory and your virtual environment is activated:
+   ```bash
+   cd [repository-name]
+   source venv/bin/activate  # On macOS/Linux
+   # or
+   .\venv\Scripts\activate  # On Windows
+   ```
+
+2. Run the application:
+   ```bash
+   python transcribe_gui.py
+   ```
+
+3. The GUI will open and you can start using the application.
 
 ## Usage
 
-1. Activate the virtual environment (if not already activated):
-```bash
-source .venv/bin/activate
-```
+1. **Add Audio Files**:
+   - Click "Add Audio Files" to select one or more audio files
+   - Files will be added to the queue with default settings
+   - You can add more files at any time when processing is paused
 
-2. Run the application:
-```bash
-python transcribe_gui.py
-```
+2. **Configure Settings**:
+   - Select default model (tiny, base, small, medium, large-v3)
+   - Toggle default timestamps setting
+   - Individual files can have their own model and timestamp settings
 
-3. In the application:
-   - Select your preferred Whisper model from the dropdown
-   - Set default timestamp preference (can be changed per file)
-   - Click "Add Audio Files" to choose your audio files
-   - Manage your file queue:
-     - Use ↑/↓ buttons to reorder files
-     - Use "Remove" to delete files from the queue
-     - Use "Toggle Timestamps" to change timestamp settings for selected files
-   - Click "Start" to begin processing
-   - Use "Pause/Resume" to temporarily stop/continue processing
-   - Use "Stop" to cancel the current batch
-   - Watch the status updates and transcriptions appear in real-time
+3. **File Queue Management**:
+   - Drag and drop files to reorder them
+   - Select files and use "Remove" to delete them from the queue
+   - Use "Toggle Timestamps" to change timestamp settings for selected files
+   - Use "Change Model" to set different models for selected files
+   - All changes can be made while processing is paused
 
-4. When you're done, you can deactivate the virtual environment:
-```bash
-deactivate
-```
+4. **Processing Controls**:
+   - Click "Start" to begin processing the queue
+   - Use "Pause" to temporarily stop processing
+   - While paused, you can:
+     - Add more files
+     - Reorder the queue
+     - Change file settings
+   - Click "Resume" to continue processing
+   - Use "Stop" to end processing completely
 
-## File Queue Management
+5. **Monitor Progress**:
+   - View real-time progress in the progress bar
+   - See estimated time remaining
+   - Check status updates for each file
+   - View completion messages and output file locations
 
-The application provides several ways to manage your transcription queue:
+## Model Information
 
-- **Adding Files**: Click "Add Audio Files" to select multiple files. They'll be added to the queue without starting processing.
-- **Reordering**: Select a file and use the ↑/↓ buttons to move it up or down in the queue.
-- **Removing Files**: Select one or more files and click "Remove" to delete them from the queue.
-- **Timestamp Control**: 
-  - Set default timestamp preference in the options
-  - Select files and use "Toggle Timestamps" to change their individual settings
-  - Each file shows its timestamp status in the queue
-
-## Processing Controls
-
-The application provides full control over the transcription process:
-
-- **Start**: Begin processing the current queue of files
-- **Pause/Resume**: 
-  - Pause the current transcription
-  - Resume from where it left off
-  - Processing can be paused at any time
-- **Stop**: 
-  - Cancel the current batch
-  - Completed files remain processed
-  - Unprocessed files remain in the queue
-
-## Models
-
-Available Whisper models with their characteristics and recommended use cases:
-
-### tiny (~75MB download, ~1GB in memory)
-- Fastest model, least accurate
-- Best for: Quick transcriptions, short audio, clear speech
-- Recommended for: English-only content, simple audio
-- Processing speed: ~2.5x real-time
-
-### base (~142MB download, ~1GB in memory)
-- Good balance of speed and accuracy
-- Best for: General purpose transcription
-- Recommended for: Most everyday transcription needs
-- Processing speed: ~2x real-time
-
-### small (~466MB download, ~2GB in memory)
-- Better accuracy, supports multiple languages
-- Best for: Multiple languages, moderate accuracy needed
-- Recommended for: International content, mixed language audio
-- Processing speed: ~1.5x real-time
-
-### medium (~1.5GB download, ~5GB in memory)
-- High accuracy, good for complex audio
-- Best for: Complex audio, multiple speakers
-- Recommended for: Professional content, interviews, meetings
-- Processing speed: ~1x real-time
-
-### large-v3 (~3GB download, ~10GB in memory)
-- Best accuracy, professional quality
-- Best for: Professional use, maximum accuracy
-- Recommended for: Critical content, complex audio, multiple speakers
-- Processing speed: ~0.6x real-time
-
-Models are stored in your home directory under `.cache/whisper/`. The download only happens once per model.
-
-## Performance and Timing
-
-Transcription time varies based on several factors:
-- Model size: Larger models are more accurate but slower
-- Audio length: Longer files take proportionally longer to process
-- CPU/GPU: Processing speed depends on your hardware
-
-For example:
-- A 5-minute audio file using the large-v3 model might take 8-10 minutes to transcribe
-- The same file using the tiny model might take 2-3 minutes but with lower accuracy
-
-## Status Updates
-
-The application provides detailed status information during transcription:
-- Audio file length and duration
-- Selected model and estimated processing time
-- Number of speech segments detected
-- Progress through multiple files (if selected)
-- Clear indication when transcription is complete
-- Location of saved transcription files
-
-## Output Format
-
-Transcriptions are saved as text files with the following information:
-- File name and total duration
-- Number of speech segments
-- Timestamps for each segment (if enabled)
-- Full transcription text
-- Saved in the same directory as the source audio file
+- **tiny**: ~75MB download, ~1GB in memory
+  - Best for: Quick transcriptions, short audio, clear speech, English only
+- **base**: ~142MB download, ~1GB in memory
+  - Best for: General purpose, good balance of speed and accuracy
+- **small**: ~466MB download, ~2GB in memory
+  - Best for: Multiple languages, moderate accuracy needed
+- **medium**: ~1.5GB download, ~5GB in memory
+  - Best for: Complex audio, multiple speakers, high accuracy needed
+- **large-v3**: ~3GB download, ~10GB in memory
+  - Best for: Professional use, maximum accuracy, complex audio
 
 ## Notes
 
-- Models are stored in your home directory under `.cache/whisper/`
-- Transcriptions are saved in the same directory as the source audio files
-- The virtual environment (`.venv`) contains all required Python packages
-- The application shows detailed status updates but cannot show real-time progress during transcription
-- You can pause/resume processing at any time
-- Files can be reordered or removed from the queue before processing
-- Each file can have its own timestamp setting
+- Models are downloaded and stored locally in `~/.cache/whisper/`
+- Processing speed varies by model and hardware
+- Each file can have its own model and timestamp settings
+- Files can be added to the queue at any time when processing is paused
+- The application will automatically switch models when processing files with different model settings
+- Estimated processing times are approximate and may vary based on your system
+
+## Troubleshooting
+
+- If you encounter any issues with FFmpeg, ensure it's properly installed and accessible in your system's PATH
+- For memory issues, try using a smaller model or processing fewer files at once
+- If the application becomes unresponsive, use the Stop button and restart processing
+- Check the status messages for any error information

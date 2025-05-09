@@ -10,6 +10,7 @@ import queue
 import os
 import librosa
 from typing import List, Dict
+import time
 
 class TranscriptionApp:
     def __init__(self, root):
@@ -24,6 +25,11 @@ class TranscriptionApp:
         self.is_processing = False
         self.is_paused = False
         self.should_stop = False
+        
+        # Time tracking
+        self.remaining_time = 0
+        self.total_time = 0
+        self.start_time = None
         
         # Model speeds for time estimation
         self.model_speeds = {
@@ -277,12 +283,16 @@ class TranscriptionApp:
         self.is_processing = True
         self.should_stop = False
         self.is_paused = False
+        self.start_time = time.time()
         
         # Update button states
         self.start_btn.configure(state=tk.DISABLED)
         self.pause_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.NORMAL)
         self.select_button.configure(state=tk.DISABLED)
+        
+        # Start the remaining time updates
+        self.update_remaining_time()
         
         # Start processing in a separate thread
         thread = threading.Thread(target=self.process_queue)
@@ -293,13 +303,27 @@ class TranscriptionApp:
         """Toggle pause state"""
         self.is_paused = not self.is_paused
         self.pause_btn.configure(text="Resume" if self.is_paused else "Pause")
-        self.queue.put(("status", "Paused" if self.is_paused else "Resuming..."))
+        
+        if self.is_paused:
+            self.start_time = None
+            # Enable file selection when paused
+            self.select_button.configure(state=tk.NORMAL)
+            self.queue.put(("status", "Paused - You can add more files"))
+            self.queue.put(("text", "\nProcessing paused. You can add more files or click 'Resume' to continue.\n"))
+        else:
+            # Reset start time when resuming
+            self.start_time = time.time()
+            # Disable file selection when resuming
+            self.select_button.configure(state=tk.DISABLED)
+            self.queue.put(("status", "Resuming..."))
+            self.queue.put(("text", "\nResuming processing...\n"))
 
     def stop_processing(self):
         """Stop processing the queue"""
         self.should_stop = True
         self.is_processing = False
         self.is_paused = False
+        self.start_time = None
         
         # Update button states
         self.start_btn.configure(state=tk.NORMAL)
@@ -307,26 +331,64 @@ class TranscriptionApp:
         self.stop_btn.configure(state=tk.DISABLED)
         self.select_button.configure(state=tk.NORMAL)
         
+        # Reset time display
+        self.update_total_time_estimate()
+        
         self.queue.put(("status", "Processing stopped"))
 
     def process_queue(self):
         """Process the file queue"""
-        # Store the model name at the start of processing
-        model_name = self.model_var.get()
-        
         try:
             # Load model once for all files
             self.queue.put(("text", "Loading model...\n"))
-            model = self.load_model(model_name)
+            current_model_name = self.model_var.get()
+            model = self.load_model(current_model_name)
             self.queue.put(("text", "Model loaded, starting transcription...\n\n"))
             
             # Get all files from the queue
             files = []
             for item in self.file_list.get_children():
-                values = self.file_list.item(item)["values"]
-                # Use the model that was selected when the file was added
-                files.append((item, values[0], values[1] == "Yes", values[5], values[3]))
+                try:
+                    values = self.file_list.item(item)["values"]
+                    if len(values) < 6:  # Ensure we have all required values
+                        self.queue.put(("text", f"\nError: Invalid file entry in queue\n"))
+                        continue
+                        
+                    filename = values[0]
+                    status = values[1]
+                    include_timestamps = values[2] == "Yes"
+                    file_path = values[5]
+                    file_model = values[3]
+                    
+                    # Skip non-local files
+                    if status == "Not Local":
+                        self.queue.put(("text", f"\nSkipping non-local file: {filename}\n"))
+                        self.queue.put(("file_status", (len(files), "Not Local")))
+                        continue
+                    
+                    # Convert to absolute path if needed
+                    file_path = os.path.abspath(file_path)
+                    
+                    # Verify file still exists and is not empty
+                    if not self.is_local_file(file_path):
+                        self.queue.put(("text", f"\nError: File is not local: {filename}\n"))
+                        self.queue.put(("file_status", (len(files), "Not Local")))
+                        continue
+                        
+                    if os.path.getsize(file_path) == 0:
+                        self.queue.put(("text", f"\nError: File is empty: {filename}\n"))
+                        self.queue.put(("file_status", (len(files), "Error")))
+                        continue
+                        
+                    files.append((item, filename, include_timestamps, file_path, file_model))
+                except Exception as e:
+                    self.queue.put(("text", f"\nError processing queue entry: {str(e)}\n"))
+                    continue
             
+            if not files:
+                self.queue.put(("text", "\nNo valid files to process\n"))
+                return
+                
             total_files = len(files)
             
             for i, (item, filename, include_timestamps, file_path, file_model) in enumerate(files, 1):
@@ -343,8 +405,21 @@ class TranscriptionApp:
                 self.queue.put(("text", f"\nStarting transcription of {filename}...\n"))
                 
                 try:
-                    # Get audio duration
-                    duration = librosa.get_duration(path=file_path)
+                    # Verify file still exists and is not empty
+                    if not self.is_local_file(file_path):
+                        raise FileNotFoundError(f"File is not local: {filename}")
+                    if os.path.getsize(file_path) == 0:
+                        raise ValueError(f"File is empty: {filename}")
+                    
+                    # Get audio duration using ffprobe
+                    import subprocess
+                    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    duration = float(result.stdout.strip())
+                    
+                    if duration <= 0:
+                        raise ValueError(f"Invalid duration for {filename}")
+                        
                     total_minutes = int(duration / 60)
                     self.queue.put(("text", f"Audio length: {total_minutes} minutes\n"))
                     
@@ -358,17 +433,17 @@ class TranscriptionApp:
                     self.queue.put(("text", "Transcription in progress...\n"))
                     self.queue.put(("text", "This may take a while. The application will update when complete.\n\n"))
                     
+                    # Load the correct model for this file if different from current
+                    if file_model != current_model_name:
+                        self.queue.put(("text", f"Loading {file_model} model for this file...\n"))
+                        model = self.load_model(file_model)
+                        current_model_name = file_model
+                    
                     # Transcribe file
                     result = model.transcribe(file_path)
                     
-                    # Show processing stats
-                    self.queue.put(("text", "Transcription complete!\n"))
-                    self.queue.put(("text", f"Found {len(result['segments'])} segments of speech\n"))
-                    
-                    # After transcription, show the segments with their timestamps
+                    # After transcription, format with timestamps if needed
                     if include_timestamps:
-                        self.queue.put(("text", "Formatting output with timestamps...\n"))
-                        # Format with timestamps
                         formatted_text = []
                         for segment in result["segments"]:
                             start_time = self.format_timestamp(segment["start"])
@@ -387,10 +462,8 @@ class TranscriptionApp:
                     
                     # Update text area with completion info
                     self.queue.put(("text", f"\n=== {filename} ===\n"))
-                    self.queue.put(("text", f"Total duration: {self.format_timestamp(duration)}\n"))
-                    self.queue.put(("text", f"Number of segments: {len(result['segments'])}\n"))
+                    self.queue.put(("text", f"Transcription complete!\n"))
                     self.queue.put(("text", f"Saved to: {output_file}\n\n"))
-                    self.queue.put(("text", f"{transcription}\n"))
                     self.queue.put(("status", f"Saved transcription to: {output_file}"))
                     
                     # Update file status
@@ -404,7 +477,11 @@ class TranscriptionApp:
                 
                 # Check for pause
                 while self.is_paused and not self.should_stop:
-                    self.root.after(100, lambda: None)
+                    self.queue.put(("status", "Paused"))
+                    time.sleep(0.1)  # Reduce CPU usage while paused
+                    self.root.update()  # Keep UI responsive
+                    if self.should_stop:  # Check if stop was requested while paused
+                        break
             
             if not self.should_stop:
                 self.queue.put(("status", "All transcriptions complete!"))
@@ -415,15 +492,26 @@ class TranscriptionApp:
         
         finally:
             self.is_processing = False
+            self.is_paused = False  # Reset pause state
+            self.start_time = None
             self.queue.put(("progress", 0))
             # Reset button states
             self.queue.put(("button_state", ("start", tk.NORMAL)))
             self.queue.put(("button_state", ("pause", tk.DISABLED)))
             self.queue.put(("button_state", ("stop", tk.DISABLED)))
             self.queue.put(("button_state", ("select", tk.NORMAL)))
+            # Reset time display
+            self.update_total_time_estimate()
 
     def select_files(self):
         """Open file dialog to select audio files"""
+        # Check if we're processing and not paused
+        if self.is_processing and not self.is_paused:
+            self.queue.put(("text", "\nCannot add files while processing is active.\n"))
+            self.queue.put(("text", "Please click 'Pause' first to add more files.\n\n"))
+            self.queue.put(("status", "Click 'Pause' to add more files"))
+            return
+
         filetypes = (
             ("Audio files", "*.wav *.mp3 *.mpeg *.mp4 *.m4a"),
             ("All files", "*.*")
@@ -435,39 +523,80 @@ class TranscriptionApp:
         )
         
         if files:
-            # Clear text area
-            self.text_area.delete(1.0, tk.END)
+            # Only clear text area if not processing
+            if not self.is_processing:
+                self.text_area.delete(1.0, tk.END)
             
             # Add files to list
             for file_path in files:
-                filename = os.path.basename(file_path)
                 try:
-                    duration = librosa.get_duration(path=file_path)
-                    total_minutes = int(duration / 60)
-                    speed_factor = self.model_speeds[self.model_var.get()]
-                    est_minutes = int((duration / 60) / speed_factor)
-                    est_time = self.format_time_estimate(est_minutes)
-                except Exception:
-                    est_time = "--:--"
-                
-                self.file_list.insert("", tk.END, text=filename, values=(
-                    filename,
-                    "Pending",
-                    "Yes" if self.timestamps_var.get() else "No",
-                    self.model_var.get(),
-                    est_time,
-                    file_path  # Store full path as hidden value
-                ))
+                    # Convert to absolute path
+                    file_path = os.path.abspath(file_path)
+                    filename = os.path.basename(file_path)
+                    
+                    # Check if file is local
+                    if not self.is_local_file(file_path):
+                        self.queue.put(("text", f"\nWarning: File is not local (may be in iCloud Drive): {filename}\n"))
+                        # Add file to list with "Not Local" status
+                        self.file_list.insert("", tk.END, values=(
+                            filename,  # Display name
+                            "Not Local",  # Status
+                            "Yes" if self.timestamps_var.get() else "No",  # Timestamps
+                            self.model_var.get(),  # Model
+                            "--:--",  # Estimated time
+                            file_path  # Full path (hidden)
+                        ))
+                        continue
+                    
+                    # Try to get duration to verify file is valid
+                    try:
+                        # Use a more efficient method to get duration
+                        import subprocess
+                        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        duration = float(result.stdout.strip())
+                        
+                        if duration <= 0:
+                            raise ValueError("Invalid duration")
+                            
+                        total_minutes = int(duration / 60)
+                        speed_factor = self.model_speeds[self.model_var.get()]
+                        est_minutes = int((duration / 60) / speed_factor)
+                        est_time = self.format_time_estimate(est_minutes)
+                    except Exception as e:
+                        self.queue.put(("text", f"\nWarning: Could not get duration for {filename}: {str(e)}\n"))
+                        est_time = "--:--"
+                    
+                    # Add file to list with full path
+                    self.file_list.insert("", tk.END, values=(
+                        filename,  # Display name
+                        "Pending",  # Status
+                        "Yes" if self.timestamps_var.get() else "No",  # Timestamps
+                        self.model_var.get(),  # Model
+                        est_time,  # Estimated time
+                        file_path  # Full path (hidden)
+                    ))
+                    
+                except Exception as e:
+                    self.queue.put(("text", f"\nError adding file {file_path}: {str(e)}\n"))
+                    continue
             
-            # Reset progress
-            self.progress["value"] = 0
-            self.progress_label["text"] = "0%"
+            # Reset progress if not processing
+            if not self.is_processing:
+                self.progress["value"] = 0
+                self.progress_label["text"] = "0%"
             
             # Update total time estimate
             self.update_total_time_estimate()
             
-            # Show model info
-            self.show_model_info()
+            # Show model info only if not processing
+            if not self.is_processing:
+                self.show_model_info()
+            
+            # If we're paused, remind user to resume
+            if self.is_paused:
+                self.queue.put(("text", "\nFiles added successfully. Click 'Resume' to continue processing.\n"))
+                self.queue.put(("status", "Files added. Click 'Resume' to continue"))
 
     def check_queue(self):
         """Check the queue for updates"""
@@ -602,14 +731,28 @@ class TranscriptionApp:
         total_minutes = 0
         for item in self.file_list.get_children():
             values = self.file_list.item(item)["values"]
-            if len(values) >= 4 and values[3] != "--:--":
+            if len(values) >= 5 and values[4] != "--:--":
                 try:
-                    hours, minutes = map(int, values[3].split(":"))
+                    hours, minutes = map(int, values[4].split(":"))
                     total_minutes += hours * 60 + minutes
                 except ValueError:
                     continue
         
-        self.total_time_label["text"] = f"Total estimated time: {self.format_time_estimate(total_minutes)}"
+        self.total_time = total_minutes
+        if not self.is_processing:
+            self.remaining_time = total_minutes
+            self.total_time_label["text"] = f"Total estimated time: {self.format_time_estimate(total_minutes)}"
+
+    def update_remaining_time(self):
+        """Update the remaining time display"""
+        if self.is_processing and not self.is_paused and self.start_time:
+            elapsed_minutes = (time.time() - self.start_time) / 60
+            self.remaining_time = max(0, self.total_time - elapsed_minutes)
+            self.total_time_label["text"] = f"Time remaining: {self.format_time_estimate(int(self.remaining_time))}"
+        
+        # Schedule next update
+        if self.is_processing:
+            self.root.after(1000, self.update_remaining_time)
 
     def load_model(self, model_name):
         """Load the Whisper model with download status"""
@@ -767,6 +910,17 @@ class TranscriptionApp:
             # Remove the dragging tag
             self.file_list.item(self.drag_item, tags=())
             self.drag_item = None
+
+    def is_local_file(self, file_path):
+        """Check if a file is local or in iCloud Drive"""
+        try:
+            # Check if file is in iCloud Drive
+            if "iCloud Drive" in file_path:
+                return False
+            # Check if file exists and is accessible
+            return os.path.isfile(file_path) and os.access(file_path, os.R_OK)
+        except Exception:
+            return False
 
 def main():
     root = tk.Tk()
