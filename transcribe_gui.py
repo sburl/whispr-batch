@@ -25,6 +25,15 @@ class TranscriptionApp:
         self.is_paused = False
         self.should_stop = False
         
+        # Model speeds for time estimation
+        self.model_speeds = {
+            "tiny": 2.5,      # ~2.5x real-time
+            "base": 2.0,      # ~2x real-time
+            "small": 1.5,     # ~1.5x real-time
+            "medium": 1.0,    # ~1x real-time
+            "large-v3": 0.6   # ~0.6x real-time
+        }
+        
         # Create main frame
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -77,14 +86,18 @@ class TranscriptionApp:
         # File list
         self.file_list = ttk.Treeview(
             self.file_list_frame,
-            columns=("status", "timestamps"),
+            columns=("status", "timestamps", "model", "est_time"),
             show="headings",
             height=10
         )
         self.file_list.heading("status", text="Status")
         self.file_list.heading("timestamps", text="Timestamps")
+        self.file_list.heading("model", text="Model")
+        self.file_list.heading("est_time", text="Est. Time")
         self.file_list.column("status", width=200)
         self.file_list.column("timestamps", width=80)
+        self.file_list.column("model", width=80)
+        self.file_list.column("est_time", width=80)
         self.file_list.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # File list scrollbar
@@ -95,6 +108,10 @@ class TranscriptionApp:
         )
         self.file_list_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self.file_list.configure(yscrollcommand=self.file_list_scrollbar.set)
+        
+        # Total time estimate label
+        self.total_time_label = ttk.Label(self.file_list_frame, text="Total estimated time: --:--")
+        self.total_time_label.grid(row=2, column=0, columnspan=2, pady=5)
         
         # File list buttons frame
         self.file_buttons_frame = ttk.Frame(self.file_list_frame)
@@ -314,6 +331,7 @@ class TranscriptionApp:
 
     def process_queue(self):
         """Process the file queue"""
+        # Store the model name at the start of processing
         model_name = self.model_var.get()
         
         try:
@@ -326,11 +344,12 @@ class TranscriptionApp:
             files = []
             for item in self.file_list.get_children():
                 values = self.file_list.item(item)["values"]
-                files.append((item, values[0].split(" - ")[0], values[1] == "Yes", values[2]))  # Include full path
+                # Use the model that was selected when the file was added
+                files.append((item, values[0].split(" - ")[0], values[1] == "Yes", values[4], values[2]))
             
             total_files = len(files)
             
-            for i, (item, filename, include_timestamps, file_path) in enumerate(files, 1):
+            for i, (item, filename, include_timestamps, file_path, file_model) in enumerate(files, 1):
                 if self.should_stop:
                     break
                 
@@ -350,18 +369,11 @@ class TranscriptionApp:
                     self.queue.put(("text", f"Audio length: {total_minutes} minutes\n"))
                     
                     # Calculate estimated processing time based on model
-                    model_speeds = {
-                        "tiny": 2.5,      # ~2.5x real-time
-                        "base": 2.0,      # ~2x real-time
-                        "small": 1.5,     # ~1.5x real-time
-                        "medium": 1.0,    # ~1x real-time
-                        "large-v3": 0.6   # ~0.6x real-time
-                    }
-                    speed_factor = model_speeds[model_name]
+                    speed_factor = self.model_speeds[file_model]
                     est_minutes = int((duration / 60) / speed_factor)
                     
                     # Show model and processing info
-                    self.queue.put(("text", f"Using {model_name} model\n"))
+                    self.queue.put(("text", f"Using {file_model} model\n"))
                     self.queue.put(("text", f"Estimated processing time: {est_minutes} minutes\n"))
                     self.queue.put(("text", "Transcription in progress...\n"))
                     self.queue.put(("text", "This may take a while. The application will update when complete.\n\n"))
@@ -449,15 +461,29 @@ class TranscriptionApp:
             # Add files to list
             for file_path in files:
                 filename = os.path.basename(file_path)
+                try:
+                    duration = librosa.get_duration(path=file_path)
+                    total_minutes = int(duration / 60)
+                    speed_factor = self.model_speeds[self.model_var.get()]
+                    est_minutes = int((duration / 60) / speed_factor)
+                    est_time = self.format_time_estimate(est_minutes)
+                except Exception:
+                    est_time = "--:--"
+                
                 self.file_list.insert("", tk.END, text=filename, values=(
                     f"{filename} - Pending",
                     "Yes" if self.timestamps_var.get() else "No",
+                    self.model_var.get(),
+                    est_time,
                     file_path  # Store full path as hidden value
                 ))
             
             # Reset progress
             self.progress["value"] = 0
             self.progress_label["text"] = "0%"
+            
+            # Update total time estimate
+            self.update_total_time_estimate()
             
             # Show model info
             self.show_model_info()
@@ -511,10 +537,37 @@ class TranscriptionApp:
 
     def on_model_change(self, event=None):
         """Update model info when model selection changes"""
-        # Clear text area
-        self.text_area.delete(1.0, tk.END)
-        # Show new model info
-        self.show_model_info()
+        # Only update the display if we're not processing
+        if not self.is_processing:
+            # Clear text area
+            self.text_area.delete(1.0, tk.END)
+            
+            # Update model and time estimates for pending files only
+            for item in self.file_list.get_children():
+                values = list(self.file_list.item(item)["values"])
+                status = values[0]
+                if "Pending" in status and len(values) >= 5:  # Only update pending files
+                    try:
+                        duration = librosa.get_duration(path=values[4])
+                        total_minutes = int(duration / 60)
+                        speed_factor = self.model_speeds[self.model_var.get()]
+                        est_minutes = int((duration / 60) / speed_factor)
+                        values[2] = self.model_var.get()  # Update model
+                        values[3] = self.format_time_estimate(est_minutes)  # Update time estimate
+                        self.file_list.item(item, values=values)
+                    except Exception:
+                        values[2] = self.model_var.get()
+                        values[3] = "--:--"
+                        self.file_list.item(item, values=values)
+            
+            # Update total time estimate
+            self.update_total_time_estimate()
+            
+            # Show new model info
+            self.show_model_info()
+        else:
+            # If processing, just update the display info
+            self.show_model_info()
 
     def show_model_info(self):
         """Show information about the selected model"""
@@ -574,6 +627,26 @@ class TranscriptionApp:
     def format_timestamp(self, seconds):
         """Convert seconds to HH:MM:SS format"""
         return str(timedelta(seconds=round(seconds)))
+
+    def format_time_estimate(self, minutes):
+        """Format time estimate in HH:MM format"""
+        hours = minutes // 60
+        mins = minutes % 60
+        return f"{hours:02d}:{mins:02d}"
+
+    def update_total_time_estimate(self):
+        """Update the total time estimate based on all files"""
+        total_minutes = 0
+        for item in self.file_list.get_children():
+            values = self.file_list.item(item)["values"]
+            if len(values) >= 4 and values[3] != "--:--":
+                try:
+                    hours, minutes = map(int, values[3].split(":"))
+                    total_minutes += hours * 60 + minutes
+                except ValueError:
+                    continue
+        
+        self.total_time_label["text"] = f"Total estimated time: {self.format_time_estimate(total_minutes)}"
 
     def load_model(self, model_name):
         """Load the Whisper model with download status"""
