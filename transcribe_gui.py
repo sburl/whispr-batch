@@ -9,15 +9,21 @@ from datetime import timedelta
 import queue
 import os
 import librosa
+from typing import List, Dict
 
 class TranscriptionApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Audio Transcription")
-        self.root.geometry("1000x800")  # Made window larger
+        self.root.geometry("1000x800")
         
         # Create message queue for thread-safe updates
         self.queue = queue.Queue()
+        
+        # Control flags
+        self.is_processing = False
+        self.is_paused = False
+        self.should_stop = False
         
         # Create main frame
         self.main_frame = ttk.Frame(root, padding="10")
@@ -36,7 +42,7 @@ class TranscriptionApp:
         
         # Model selection
         ttk.Label(self.options_frame, text="Model:").grid(row=0, column=0, padx=5)
-        self.model_var = tk.StringVar(value="large-v3")
+        self.model_var = tk.StringVar(value="base")
         self.model_combo = ttk.Combobox(
             self.options_frame,
             textvariable=self.model_var,
@@ -47,11 +53,11 @@ class TranscriptionApp:
         self.model_combo.grid(row=0, column=1, padx=5)
         self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
         
-        # Timestamps checkbox
+        # Default timestamps checkbox
         self.timestamps_var = tk.BooleanVar(value=True)
         self.timestamps_check = ttk.Checkbutton(
             self.options_frame,
-            text="Include Timestamps",
+            text="Default Timestamps",
             variable=self.timestamps_var
         )
         self.timestamps_check.grid(row=0, column=2, padx=5)
@@ -59,7 +65,7 @@ class TranscriptionApp:
         # File selection button
         self.select_button = ttk.Button(
             self.left_frame, 
-            text="Select Audio Files",
+            text="Add Audio Files",
             command=self.select_files
         )
         self.select_button.grid(row=1, column=0, pady=5)
@@ -71,12 +77,14 @@ class TranscriptionApp:
         # File list
         self.file_list = ttk.Treeview(
             self.file_list_frame,
-            columns=("status",),
+            columns=("status", "timestamps"),
             show="headings",
             height=10
         )
         self.file_list.heading("status", text="Status")
-        self.file_list.column("status", width=100)
+        self.file_list.heading("timestamps", text="Timestamps")
+        self.file_list.column("status", width=200)
+        self.file_list.column("timestamps", width=80)
         self.file_list.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # File list scrollbar
@@ -87,6 +95,69 @@ class TranscriptionApp:
         )
         self.file_list_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self.file_list.configure(yscrollcommand=self.file_list_scrollbar.set)
+        
+        # File list buttons frame
+        self.file_buttons_frame = ttk.Frame(self.file_list_frame)
+        self.file_buttons_frame.grid(row=1, column=0, columnspan=2, pady=5)
+        
+        # File list control buttons
+        self.move_up_btn = ttk.Button(
+            self.file_buttons_frame,
+            text="↑",
+            width=3,
+            command=self.move_file_up
+        )
+        self.move_up_btn.grid(row=0, column=0, padx=2)
+        
+        self.move_down_btn = ttk.Button(
+            self.file_buttons_frame,
+            text="↓",
+            width=3,
+            command=self.move_file_down
+        )
+        self.move_down_btn.grid(row=0, column=1, padx=2)
+        
+        self.remove_btn = ttk.Button(
+            self.file_buttons_frame,
+            text="Remove",
+            command=self.remove_selected_file
+        )
+        self.remove_btn.grid(row=0, column=2, padx=2)
+        
+        self.toggle_timestamps_btn = ttk.Button(
+            self.file_buttons_frame,
+            text="Toggle Timestamps",
+            command=self.toggle_selected_timestamps
+        )
+        self.toggle_timestamps_btn.grid(row=0, column=3, padx=2)
+        
+        # Control buttons frame
+        self.control_frame = ttk.Frame(self.left_frame)
+        self.control_frame.grid(row=3, column=0, pady=5)
+        
+        # Control buttons
+        self.start_btn = ttk.Button(
+            self.control_frame,
+            text="Start",
+            command=self.start_processing
+        )
+        self.start_btn.grid(row=0, column=0, padx=2)
+        
+        self.pause_btn = ttk.Button(
+            self.control_frame,
+            text="Pause",
+            command=self.toggle_pause,
+            state=tk.DISABLED
+        )
+        self.pause_btn.grid(row=0, column=1, padx=2)
+        
+        self.stop_btn = ttk.Button(
+            self.control_frame,
+            text="Stop",
+            command=self.stop_processing,
+            state=tk.DISABLED
+        )
+        self.stop_btn.grid(row=0, column=2, padx=2)
         
         # Transcription text area
         self.text_area = scrolledtext.ScrolledText(
@@ -100,7 +171,7 @@ class TranscriptionApp:
         # Model download progress frame
         self.model_progress_frame = ttk.LabelFrame(self.right_frame, text="Model Download Progress", padding="5")
         self.model_progress_frame.grid(row=1, column=0, pady=5, sticky=(tk.W, tk.E))
-        self.model_progress_frame.grid_remove()  # Hide by default
+        self.model_progress_frame.grid_remove()
         
         # Model download progress bar
         self.model_progress = ttk.Progressbar(
@@ -156,6 +227,287 @@ class TranscriptionApp:
         
         # Show model info
         self.show_model_info()
+
+    def move_file_up(self):
+        """Move selected file up in the queue"""
+        selected = self.file_list.selection()
+        if not selected:
+            return
+        
+        item = selected[0]
+        index = self.file_list.index(item)
+        if index > 0:
+            self.file_list.move(item, "", index - 1)
+
+    def move_file_down(self):
+        """Move selected file down in the queue"""
+        selected = self.file_list.selection()
+        if not selected:
+            return
+        
+        item = selected[0]
+        index = self.file_list.index(item)
+        if index < len(self.file_list.get_children()) - 1:
+            self.file_list.move(item, "", index + 1)
+
+    def remove_selected_file(self):
+        """Remove selected file from the queue"""
+        selected = self.file_list.selection()
+        if not selected:
+            return
+        
+        for item in selected:
+            self.file_list.delete(item)
+
+    def toggle_selected_timestamps(self):
+        """Toggle timestamps for selected file"""
+        selected = self.file_list.selection()
+        if not selected:
+            return
+        
+        for item in selected:
+            current = self.file_list.item(item)["values"][1]
+            new_value = "No" if current == "Yes" else "Yes"
+            values = list(self.file_list.item(item)["values"])
+            values[1] = new_value
+            self.file_list.item(item, values=values)
+
+    def start_processing(self):
+        """Start processing the file queue"""
+        if not self.file_list.get_children():
+            return
+        
+        self.is_processing = True
+        self.should_stop = False
+        self.is_paused = False
+        
+        # Update button states
+        self.start_btn.configure(state=tk.DISABLED)
+        self.pause_btn.configure(state=tk.NORMAL)
+        self.stop_btn.configure(state=tk.NORMAL)
+        self.select_button.configure(state=tk.DISABLED)
+        
+        # Start processing in a separate thread
+        thread = threading.Thread(target=self.process_queue)
+        thread.daemon = True
+        thread.start()
+
+    def toggle_pause(self):
+        """Toggle pause state"""
+        self.is_paused = not self.is_paused
+        self.pause_btn.configure(text="Resume" if self.is_paused else "Pause")
+        self.queue.put(("status", "Paused" if self.is_paused else "Resuming..."))
+
+    def stop_processing(self):
+        """Stop processing the queue"""
+        self.should_stop = True
+        self.is_processing = False
+        self.is_paused = False
+        
+        # Update button states
+        self.start_btn.configure(state=tk.NORMAL)
+        self.pause_btn.configure(state=tk.DISABLED)
+        self.stop_btn.configure(state=tk.DISABLED)
+        self.select_button.configure(state=tk.NORMAL)
+        
+        self.queue.put(("status", "Processing stopped"))
+
+    def process_queue(self):
+        """Process the file queue"""
+        model_name = self.model_var.get()
+        
+        try:
+            # Load model once for all files
+            self.queue.put(("text", "Loading model...\n"))
+            model = self.load_model(model_name)
+            self.queue.put(("text", "Model loaded, starting transcription...\n\n"))
+            
+            # Get all files from the queue
+            files = []
+            for item in self.file_list.get_children():
+                values = self.file_list.item(item)["values"]
+                files.append((item, values[0].split(" - ")[0], values[1] == "Yes", values[2]))  # Include full path
+            
+            total_files = len(files)
+            
+            for i, (item, filename, include_timestamps, file_path) in enumerate(files, 1):
+                if self.should_stop:
+                    break
+                
+                # Update file status
+                self.queue.put(("file_status", (i-1, f"{filename} - Processing")))
+                
+                # Update progress
+                progress = (i/total_files) * 100
+                self.queue.put(("progress", progress))
+                self.queue.put(("status", f"Processing file {i} of {total_files}: {filename}"))
+                self.queue.put(("text", f"\nStarting transcription of {filename}...\n"))
+                
+                try:
+                    # Get audio duration
+                    duration = librosa.get_duration(path=file_path)
+                    total_minutes = int(duration / 60)
+                    self.queue.put(("text", f"Audio length: {total_minutes} minutes\n"))
+                    
+                    # Calculate estimated processing time based on model
+                    model_speeds = {
+                        "tiny": 2.5,      # ~2.5x real-time
+                        "base": 2.0,      # ~2x real-time
+                        "small": 1.5,     # ~1.5x real-time
+                        "medium": 1.0,    # ~1x real-time
+                        "large-v3": 0.6   # ~0.6x real-time
+                    }
+                    speed_factor = model_speeds[model_name]
+                    est_minutes = int((duration / 60) / speed_factor)
+                    
+                    # Show model and processing info
+                    self.queue.put(("text", f"Using {model_name} model\n"))
+                    self.queue.put(("text", f"Estimated processing time: {est_minutes} minutes\n"))
+                    self.queue.put(("text", "Transcription in progress...\n"))
+                    self.queue.put(("text", "This may take a while. The application will update when complete.\n\n"))
+                    
+                    # Transcribe file
+                    result = model.transcribe(file_path)
+                    
+                    # Show processing stats
+                    self.queue.put(("text", "Transcription complete!\n"))
+                    self.queue.put(("text", f"Found {len(result['segments'])} segments of speech\n"))
+                    
+                    # After transcription, show the segments with their timestamps
+                    if include_timestamps:
+                        self.queue.put(("text", "Formatting output with timestamps...\n"))
+                        # Format with timestamps
+                        formatted_text = []
+                        for segment in result["segments"]:
+                            start_time = self.format_timestamp(segment["start"])
+                            end_time = self.format_timestamp(segment["end"])
+                            text = segment["text"].strip()
+                            formatted_text.append(f"[{start_time} --> {end_time}] {text}")
+                        transcription = "\n".join(formatted_text)
+                    else:
+                        transcription = result["text"]
+                    
+                    # Save to file in the same directory as the source file
+                    output_file = Path(file_path).parent / f"{Path(file_path).stem}_transcription.txt"
+                    
+                    with open(output_file, "w", encoding="utf-8") as f:
+                        f.write(transcription)
+                    
+                    # Update text area with completion info
+                    self.queue.put(("text", f"\n=== {filename} ===\n"))
+                    self.queue.put(("text", f"Total duration: {self.format_timestamp(duration)}\n"))
+                    self.queue.put(("text", f"Number of segments: {len(result['segments'])}\n"))
+                    self.queue.put(("text", f"Saved to: {output_file}\n\n"))
+                    self.queue.put(("text", f"{transcription}\n"))
+                    self.queue.put(("status", f"Saved transcription to: {output_file}"))
+                    
+                    # Update file status
+                    self.queue.put(("file_status", (i-1, f"{filename} - Complete")))
+                    
+                except Exception as e:
+                    error_msg = f"Error processing {filename}: {str(e)}"
+                    self.queue.put(("text", f"\n=== {filename} ===\n{error_msg}\n"))
+                    self.queue.put(("status", error_msg))
+                    self.queue.put(("file_status", (i-1, f"{filename} - Error")))
+                
+                # Check for pause
+                while self.is_paused and not self.should_stop:
+                    self.root.after(100, lambda: None)
+            
+            if not self.should_stop:
+                self.queue.put(("status", "All transcriptions complete!"))
+            
+        except Exception as e:
+            self.queue.put(("status", f"Error: {str(e)}"))
+            self.queue.put(("text", f"\nError during processing: {str(e)}\n"))
+        
+        finally:
+            self.is_processing = False
+            self.queue.put(("progress", 0))
+            # Reset button states
+            self.queue.put(("button_state", ("start", tk.NORMAL)))
+            self.queue.put(("button_state", ("pause", tk.DISABLED)))
+            self.queue.put(("button_state", ("stop", tk.DISABLED)))
+            self.queue.put(("button_state", ("select", tk.NORMAL)))
+
+    def select_files(self):
+        """Open file dialog to select audio files"""
+        filetypes = (
+            ("Audio files", "*.wav *.mp3 *.mpeg *.mp4 *.m4a"),
+            ("All files", "*.*")
+        )
+        
+        files = filedialog.askopenfilenames(
+            title="Select audio files",
+            filetypes=filetypes
+        )
+        
+        if files:
+            # Clear text area
+            self.text_area.delete(1.0, tk.END)
+            
+            # Add files to list
+            for file_path in files:
+                filename = os.path.basename(file_path)
+                self.file_list.insert("", tk.END, text=filename, values=(
+                    f"{filename} - Pending",
+                    "Yes" if self.timestamps_var.get() else "No",
+                    file_path  # Store full path as hidden value
+                ))
+            
+            # Reset progress
+            self.progress["value"] = 0
+            self.progress_label["text"] = "0%"
+            
+            # Show model info
+            self.show_model_info()
+
+    def check_queue(self):
+        """Check the queue for updates"""
+        try:
+            while True:
+                msg_type, msg_data = self.queue.get_nowait()
+                
+                if msg_type == "text":
+                    self.text_area.insert(tk.END, msg_data)
+                    self.text_area.see(tk.END)
+                elif msg_type == "progress":
+                    self.progress["value"] = msg_data
+                    self.progress_label["text"] = f"{int(msg_data)}%"
+                elif msg_type == "model_progress":
+                    self.model_progress["value"] = msg_data
+                elif msg_type == "model_progress_label":
+                    self.model_progress_label["text"] = msg_data
+                elif msg_type == "status":
+                    self.status_label["text"] = msg_data
+                elif msg_type == "file_status":
+                    index, status = msg_data
+                    item = self.file_list.get_children()[index]
+                    values = list(self.file_list.item(item)["values"])
+                    values[0] = status
+                    self.file_list.item(item, values=values)
+                elif msg_type == "show_model_progress":
+                    if msg_data:
+                        self.model_progress_frame.grid()
+                    else:
+                        self.model_progress_frame.grid_remove()
+                elif msg_type == "button_state":
+                    button, state = msg_data
+                    if button == "start":
+                        self.start_btn.configure(state=state)
+                    elif button == "pause":
+                        self.pause_btn.configure(state=state)
+                    elif button == "stop":
+                        self.stop_btn.configure(state=state)
+                    elif button == "select":
+                        self.select_button.configure(state=state)
+                
+                self.queue.task_done()
+        except queue.Empty:
+            pass
+        
+        # Schedule next check
+        self.root.after(100, self.check_queue)
 
     def on_model_change(self, event=None):
         """Update model info when model selection changes"""
@@ -253,177 +605,6 @@ class TranscriptionApp:
             self.queue.put(("text", f"\nError: {error_msg}\n"))
             self.queue.put(("show_model_progress", False))
             raise
-
-    def select_files(self):
-        """Open file dialog to select audio files"""
-        filetypes = (
-            ("Audio files", "*.wav *.mp3 *.mpeg *.mp4 *.m4a"),
-            ("All files", "*.*")
-        )
-        
-        files = filedialog.askopenfilenames(
-            title="Select audio files",
-            filetypes=filetypes
-        )
-        
-        if files:
-            # Clear text area
-            self.text_area.delete(1.0, tk.END)
-            
-            # Clear file list
-            for item in self.file_list.get_children():
-                self.file_list.delete(item)
-            
-            # Add files to list
-            for file_path in files:
-                filename = os.path.basename(file_path)
-                self.file_list.insert("", tk.END, text=filename, values=(f"{filename} - Pending",))
-            
-            # Reset progress
-            self.progress["value"] = 0
-            self.progress_label["text"] = "0%"
-            
-            # Start processing in a separate thread
-            thread = threading.Thread(
-                target=self.process_files,
-                args=([Path(f) for f in files],)
-            )
-            thread.daemon = True
-            thread.start()
-
-    def process_files(self, files):
-        """Process files in a separate thread"""
-        total_files = len(files)
-        model_name = self.model_var.get()
-        include_timestamps = self.timestamps_var.get()
-        
-        try:
-            # Load model once for all files
-            self.queue.put(("text", "Loading model...\n"))
-            model = self.load_model(model_name)
-            self.queue.put(("text", "Model loaded, starting transcription...\n\n"))
-            
-            for i, file_path in enumerate(files, 1):
-                filename = os.path.basename(file_path)
-                # Update file status
-                self.queue.put(("file_status", (i-1, f"{filename} - Processing")))
-                
-                # Update progress
-                progress = (i/total_files) * 100
-                self.queue.put(("progress", progress))
-                self.queue.put(("status", f"Processing file {i} of {total_files}: {filename}"))
-                self.queue.put(("text", f"\nStarting transcription of {filename}...\n"))
-                
-                try:
-                    # Get audio duration
-                    duration = librosa.get_duration(path=str(file_path))
-                    total_minutes = int(duration / 60)
-                    self.queue.put(("text", f"Audio length: {total_minutes} minutes\n"))
-                    
-                    # Calculate estimated processing time based on model
-                    model_speeds = {
-                        "tiny": 2.5,      # ~2.5x real-time
-                        "base": 2.0,      # ~2x real-time
-                        "small": 1.5,     # ~1.5x real-time
-                        "medium": 1.0,    # ~1x real-time
-                        "large-v3": 0.6   # ~0.6x real-time
-                    }
-                    speed_factor = model_speeds[model_name]
-                    est_minutes = int((duration / 60) / speed_factor)
-                    
-                    # Show model and processing info
-                    self.queue.put(("text", f"Using {model_name} model\n"))
-                    self.queue.put(("text", f"Estimated processing time: {est_minutes} minutes\n"))
-                    self.queue.put(("text", "Transcription in progress...\n"))
-                    self.queue.put(("text", "This may take a while. The application will update when complete.\n\n"))
-                    
-                    # Transcribe file
-                    result = model.transcribe(str(file_path))
-                    
-                    # Show processing stats
-                    self.queue.put(("text", "Transcription complete!\n"))
-                    self.queue.put(("text", f"Found {len(result['segments'])} segments of speech\n"))
-                    
-                    # After transcription, show the segments with their timestamps
-                    if include_timestamps:
-                        self.queue.put(("text", "Formatting output with timestamps...\n"))
-                        # Format with timestamps
-                        formatted_text = []
-                        for segment in result["segments"]:
-                            start_time = self.format_timestamp(segment["start"])
-                            end_time = self.format_timestamp(segment["end"])
-                            text = segment["text"].strip()
-                            formatted_text.append(f"[{start_time} --> {end_time}] {text}")
-                        transcription = "\n".join(formatted_text)
-                    else:
-                        transcription = result["text"]
-                    
-                    # Save to file in the same directory as the source file
-                    output_file = file_path.parent / f"{file_path.stem}_transcription.txt"
-                    
-                    with open(output_file, "w", encoding="utf-8") as f:
-                        f.write(transcription)
-                    
-                    # Update text area with completion info
-                    self.queue.put(("text", f"\n=== {filename} ===\n"))
-                    self.queue.put(("text", f"Total duration: {self.format_timestamp(duration)}\n"))
-                    self.queue.put(("text", f"Number of segments: {len(result['segments'])}\n"))
-                    self.queue.put(("text", f"Saved to: {output_file}\n\n"))
-                    self.queue.put(("text", f"{transcription}\n"))
-                    self.queue.put(("status", f"Saved transcription to: {output_file}"))
-                    
-                    # Update file status
-                    self.queue.put(("file_status", (i-1, f"{filename} - Complete")))
-                    
-                except Exception as e:
-                    error_msg = f"Error processing {filename}: {str(e)}"
-                    self.queue.put(("text", f"\n=== {filename} ===\n{error_msg}\n"))
-                    self.queue.put(("status", error_msg))
-                    self.queue.put(("file_status", (i-1, f"{filename} - Error")))
-            
-            self.queue.put(("status", "All transcriptions complete!"))
-            
-        except Exception as e:
-            self.queue.put(("status", f"Error: {str(e)}"))
-            self.queue.put(("text", f"\nError during processing: {str(e)}\n"))
-        
-        finally:
-            self.queue.put(("progress", 0))
-
-    def check_queue(self):
-        """Check the queue for updates"""
-        try:
-            while True:
-                msg_type, msg_data = self.queue.get_nowait()
-                
-                if msg_type == "text":
-                    self.text_area.insert(tk.END, msg_data)
-                    self.text_area.see(tk.END)
-                elif msg_type == "progress":
-                    self.progress["value"] = msg_data
-                    self.progress_label["text"] = f"{int(msg_data)}%"
-                elif msg_type == "model_progress":
-                    self.model_progress["value"] = msg_data
-                elif msg_type == "model_progress_label":
-                    self.model_progress_label["text"] = msg_data
-                elif msg_type == "status":
-                    self.status_label["text"] = msg_data
-                elif msg_type == "file_status":
-                    index, status = msg_data
-                    item = self.file_list.get_children()[index]
-                    self.file_list.item(item, values=(status,))
-                elif msg_type == "show_model_progress":
-                    if msg_data:
-                        self.model_progress_frame.grid()
-                    else:
-                        self.model_progress_frame.grid_remove()
-                
-                self.queue.task_done()
-        except queue.Empty:
-            pass
-        
-        # Schedule next check
-        self.root.after(100, self.check_queue)
 
 def main():
     root = tk.Tk()
