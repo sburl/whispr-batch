@@ -1,6 +1,10 @@
-# Audio Transcription Tool
+# WhisprBatch
 
-A Python-based GUI application for transcribing audio files using OpenAI's Whisper model. This tool provides a user-friendly interface for batch processing audio files with flexible settings and real-time progress tracking.
+A Python-based GUI application for transcribing audio files using OpenAI's local Whisper models. This tool provides a user-friendly interface for batch processing audio files with flexible settings and real-time progress tracking.
+
+## Known issues
+
+- **iCloud Drive undownloaded files**: files that are not 100% local on your computer will crash the program.
 
 ## Features
 

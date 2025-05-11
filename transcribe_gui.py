@@ -360,24 +360,34 @@ class TranscriptionApp:
                     file_path = values[5]
                     file_model = values[3]
                     
-                    # Skip non-local files
-                    if status == "Not Local":
-                        self.queue.put(("text", f"\nSkipping non-local file: {filename}\n"))
-                        self.queue.put(("file_status", (len(files), "Not Local")))
+                    # Skip files that aren't ready for processing
+                    if status not in ["Pending"]:
+                        self.queue.put(("text", f"\nSkipping {status.lower()} file: {filename}\n"))
+                        self.queue.put(("file_status", (len(files), status)))
                         continue
                     
                     # Convert to absolute path if needed
                     file_path = os.path.abspath(file_path)
                     
-                    # Verify file still exists and is not empty
+                    # Verify file still exists and is accessible
                     if not self.is_local_file(file_path):
-                        self.queue.put(("text", f"\nError: File is not local: {filename}\n"))
-                        self.queue.put(("file_status", (len(files), "Not Local")))
+                        self.queue.put(("text", f"\nError: File is not accessible: {filename}\n"))
+                        self.queue.put(("file_status", (len(files), "Not Accessible")))
                         continue
                         
-                    if os.path.getsize(file_path) == 0:
-                        self.queue.put(("text", f"\nError: File is empty: {filename}\n"))
-                        self.queue.put(("file_status", (len(files), "Error")))
+                    # Verify file is a valid audio file
+                    try:
+                        import subprocess
+                        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                        if result.returncode != 0:
+                            raise ValueError("Invalid audio file")
+                        duration = float(result.stdout.strip())
+                        if duration <= 0:
+                            raise ValueError("Invalid duration")
+                    except Exception as e:
+                        self.queue.put(("text", f"\nError: Invalid audio file: {filename}\n"))
+                        self.queue.put(("file_status", (len(files), "Invalid")))
                         continue
                         
                     files.append((item, filename, include_timestamps, file_path, file_model))
@@ -387,6 +397,7 @@ class TranscriptionApp:
             
             if not files:
                 self.queue.put(("text", "\nNo valid files to process\n"))
+                self.stop_processing()
                 return
                 
             total_files = len(files)
@@ -405,16 +416,16 @@ class TranscriptionApp:
                 self.queue.put(("text", f"\nStarting transcription of {filename}...\n"))
                 
                 try:
-                    # Verify file still exists and is not empty
+                    # Verify file still exists and is accessible
                     if not self.is_local_file(file_path):
-                        raise FileNotFoundError(f"File is not local: {filename}")
-                    if os.path.getsize(file_path) == 0:
-                        raise ValueError(f"File is empty: {filename}")
+                        raise FileNotFoundError(f"File is not accessible: {filename}")
                     
                     # Get audio duration using ffprobe
                     import subprocess
                     cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
-                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                    if result.returncode != 0:
+                        raise ValueError(f"Invalid audio file: {filename}")
                     duration = float(result.stdout.strip())
                     
                     if duration <= 0:
@@ -474,6 +485,7 @@ class TranscriptionApp:
                     self.queue.put(("text", f"\n=== {filename} ===\n{error_msg}\n"))
                     self.queue.put(("status", error_msg))
                     self.queue.put(("file_status", (i-1, "Error")))
+                    continue  # Continue with next file instead of crashing
                 
                 # Check for pause
                 while self.is_paused and not self.should_stop:
@@ -505,24 +517,32 @@ class TranscriptionApp:
 
     def select_files(self):
         """Open file dialog to select audio files"""
-        # Check if we're processing and not paused
-        if self.is_processing and not self.is_paused:
-            self.queue.put(("text", "\nCannot add files while processing is active.\n"))
-            self.queue.put(("text", "Please click 'Pause' first to add more files.\n\n"))
-            self.queue.put(("status", "Click 'Pause' to add more files"))
-            return
+        try:
+            # Check if we're processing and not paused
+            if self.is_processing and not self.is_paused:
+                self.queue.put(("text", "\nCannot add files while processing is active.\n"))
+                self.queue.put(("text", "Please click 'Pause' first to add more files.\n\n"))
+                self.queue.put(("status", "Click 'Pause' to add more files"))
+                return
 
-        filetypes = (
-            ("Audio files", "*.wav *.mp3 *.mpeg *.mp4 *.m4a"),
-            ("All files", "*.*")
-        )
-        
-        files = filedialog.askopenfilenames(
-            title="Select audio files",
-            filetypes=filetypes
-        )
-        
-        if files:
+            filetypes = (
+                ("Audio files", "*.wav *.mp3 *.mpeg *.mp4 *.m4a"),
+                ("All files", "*.*")
+            )
+            
+            try:
+                files = filedialog.askopenfilenames(
+                    title="Select audio files",
+                    filetypes=filetypes
+                )
+            except Exception as e:
+                self.queue.put(("text", f"\nError opening file dialog: {str(e)}\n"))
+                self.queue.put(("status", "Error selecting files"))
+                return
+            
+            if not files:  # User cancelled or no files selected
+                return
+            
             # Only clear text area if not processing
             if not self.is_processing:
                 self.text_area.delete(1.0, tk.END)
@@ -534,13 +554,19 @@ class TranscriptionApp:
                     file_path = os.path.abspath(file_path)
                     filename = os.path.basename(file_path)
                     
-                    # Check if file is local
+                    # Check if file is accessible
                     if not self.is_local_file(file_path):
-                        self.queue.put(("text", f"\nWarning: File is not local (may be in iCloud Drive): {filename}\n"))
-                        # Add file to list with "Not Local" status
+                        self.queue.put(("text", f"\nWarning: Cannot access file: {filename}\n"))
+                        if "iCloud Drive" in file_path:
+                            self.queue.put(("text", "This file is in iCloud Drive and needs to be downloaded first.\n"))
+                            self.queue.put(("text", "Please download it from iCloud Drive before trying again.\n\n"))
+                        else:
+                            self.queue.put(("text", "Please make sure the file exists and you have permission to access it.\n\n"))
+                        
+                        # Add file to list with "Not Accessible" status
                         self.file_list.insert("", tk.END, values=(
                             filename,  # Display name
-                            "Not Local",  # Status
+                            "Not Accessible",  # Status
                             "Yes" if self.timestamps_var.get() else "No",  # Timestamps
                             self.model_var.get(),  # Model
                             "--:--",  # Estimated time
@@ -550,10 +576,14 @@ class TranscriptionApp:
                     
                     # Try to get duration to verify file is valid
                     try:
-                        # Use a more efficient method to get duration
+                        # Use a more efficient method to get duration with timeout
                         import subprocess
                         cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
-                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)  # 5 second timeout
+                        
+                        if result.returncode != 0:
+                            raise ValueError("Invalid audio file")
+                            
                         duration = float(result.stdout.strip())
                         
                         if duration <= 0:
@@ -563,9 +593,34 @@ class TranscriptionApp:
                         speed_factor = self.model_speeds[self.model_var.get()]
                         est_minutes = int((duration / 60) / speed_factor)
                         est_time = self.format_time_estimate(est_minutes)
+                    except (subprocess.TimeoutExpired, ValueError, subprocess.CalledProcessError) as e:
+                        self.queue.put(("text", f"\nWarning: Invalid audio file: {filename}\n"))
+                        self.queue.put(("text", "This file appears to be corrupted or is not a valid audio file.\n\n"))
+                        
+                        # Add file to list with "Invalid" status
+                        self.file_list.insert("", tk.END, values=(
+                            filename,  # Display name
+                            "Invalid",  # Status
+                            "Yes" if self.timestamps_var.get() else "No",  # Timestamps
+                            self.model_var.get(),  # Model
+                            "--:--",  # Estimated time
+                            file_path  # Full path (hidden)
+                        ))
+                        continue
                     except Exception as e:
-                        self.queue.put(("text", f"\nWarning: Could not get duration for {filename}: {str(e)}\n"))
-                        est_time = "--:--"
+                        self.queue.put(("text", f"\nWarning: Could not process {filename}: {str(e)}\n"))
+                        self.queue.put(("text", "This file may be corrupted or in an unsupported format.\n\n"))
+                        
+                        # Add file to list with "Error" status
+                        self.file_list.insert("", tk.END, values=(
+                            filename,  # Display name
+                            "Error",  # Status
+                            "Yes" if self.timestamps_var.get() else "No",  # Timestamps
+                            self.model_var.get(),  # Model
+                            "--:--",  # Estimated time
+                            file_path  # Full path (hidden)
+                        ))
+                        continue
                     
                     # Add file to list with full path
                     self.file_list.insert("", tk.END, values=(
@@ -597,6 +652,20 @@ class TranscriptionApp:
             if self.is_paused:
                 self.queue.put(("text", "\nFiles added successfully. Click 'Resume' to continue processing.\n"))
                 self.queue.put(("status", "Files added. Click 'Resume' to continue"))
+                
+        except Exception as e:
+            self.queue.put(("text", f"\nUnexpected error during file selection: {str(e)}\n"))
+            self.queue.put(("status", "Error selecting files"))
+            # Reset any state that might have been left in an invalid state
+            self.is_processing = False
+            self.is_paused = False
+            self.start_time = None
+            self.progress["value"] = 0
+            self.progress_label["text"] = "0%"
+            self.start_btn.configure(state=tk.NORMAL)
+            self.pause_btn.configure(state=tk.DISABLED)
+            self.stop_btn.configure(state=tk.DISABLED)
+            self.select_button.configure(state=tk.NORMAL)
 
     def check_queue(self):
         """Check the queue for updates"""
@@ -912,14 +981,14 @@ class TranscriptionApp:
             self.drag_item = None
 
     def is_local_file(self, file_path):
-        """Check if a file is local or in iCloud Drive"""
+        """Check if a file is accessible and readable"""
         try:
-            # Check if file is in iCloud Drive
-            if "iCloud Drive" in file_path:
-                return False
-            # Check if file exists and is accessible
-            return os.path.isfile(file_path) and os.access(file_path, os.R_OK)
-        except Exception:
+            # Try to open the file for reading
+            with open(file_path, 'rb') as f:
+                # Try to read a small chunk to verify access
+                f.read(1024)
+            return True
+        except (IOError, OSError):
             return False
 
 def main():
