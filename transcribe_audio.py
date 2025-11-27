@@ -10,10 +10,10 @@ def format_timestamp(seconds):
     """Convert seconds to HH:MM:SS format"""
     return str(timedelta(seconds=round(seconds)))
 
-def transcribe_audio(file_path, model_name="large-v3", include_timestamps=True):
+def transcribe_audio(file_path, model_name="large-v3", include_timestamps=True, model=None):
     """Transcribe audio file using Whisper model"""
-    print(f"Loading Whisper model: {model_name}")
-    model = whisper.load_model(model_name)
+    # Allow caller to supply a pre-loaded model so we don't reload per file
+    model = model or whisper.load_model(model_name)
     
     print(f"Transcribing: {file_path}")
     result = model.transcribe(str(file_path))
@@ -38,6 +38,10 @@ def process_directory(directory_path, model_name="large-v3", include_timestamps=
     if not directory.exists():
         raise ValueError(f"Directory not found: {directory_path}")
     
+    # Load the model once for the entire run to avoid repeated downloads and RAM spikes
+    print(f"Loading Whisper model: {model_name}")
+    model = whisper.load_model(model_name)
+    
     # Create output directory
     output_dir = directory / "transcriptions"
     output_dir.mkdir(exist_ok=True)
@@ -47,7 +51,7 @@ def process_directory(directory_path, model_name="large-v3", include_timestamps=
         if file_path.suffix.lower() in audio_extensions:
             print(f"\nProcessing: {file_path.name}")
             try:
-                transcription = transcribe_audio(file_path, model_name, include_timestamps)
+                transcription = transcribe_audio(file_path, model_name, include_timestamps, model=model)
                 
                 # Save transcription to file
                 output_file = output_dir / f"{file_path.stem}_transcription.txt"

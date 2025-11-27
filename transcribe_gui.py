@@ -4,7 +4,6 @@ import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext
 import threading
 from pathlib import Path
-import whisper
 from datetime import timedelta
 import queue
 import os
@@ -25,11 +24,21 @@ class TranscriptionApp:
         self.is_processing = False
         self.is_paused = False
         self.should_stop = False
+        self.worker_thread = None
+        
+        # Task queue and progress tracking
+        self.task_queue = queue.Queue()
+        self.progress_lock = threading.Lock()
+        self.total_tasks = 0
+        self.completed_tasks = 0
         
         # Time tracking
         self.remaining_time = 0
         self.total_time = 0
         self.start_time = None
+        self.transcribe_start_time = None
+        self.transcribe_filename = None
+        self.transcribe_timer_id = None
         
         # Model speeds for time estimation
         self.model_speeds = {
@@ -249,6 +258,37 @@ class TranscriptionApp:
         # Show model info
         self.show_model_info()
 
+    def reset_progress_tracking(self):
+        """Reset counters and progress UI"""
+        with self.progress_lock:
+            self.total_tasks = 0
+            self.completed_tasks = 0
+        self.progress["value"] = 0
+        self.progress_label["text"] = "0%"
+
+    def enqueue_task_from_values(self, item_id, values):
+        """Push a pending file into the worker queue"""
+        if len(values) < 6:
+            return
+        filename, status, timestamps_flag, file_model, _, file_path = values
+        if status != "Pending":
+            return
+        include_timestamps = timestamps_flag == "Yes"
+        file_path = os.path.abspath(file_path)
+        with self.progress_lock:
+            self.total_tasks += 1
+            total = self.total_tasks
+            completed = self.completed_tasks
+        percent = int((completed / total) * 100) if total else 0
+        self.task_queue.put({
+            "item_id": item_id,
+            "filename": filename,
+            "include_timestamps": include_timestamps,
+            "file_path": file_path,
+            "file_model": file_model
+        })
+        self.queue.put(("progress", percent))
+
     def remove_selected_file(self):
         """Remove selected file from the queue"""
         selected = self.file_list.selection()
@@ -277,13 +317,38 @@ class TranscriptionApp:
 
     def start_processing(self):
         """Start processing the file queue"""
-        if not self.file_list.get_children():
+        # If already processing but paused, just resume
+        if self.is_processing and self.is_paused:
+            self.is_paused = False
+            self.start_time = time.time()
+            self.select_button.configure(state=tk.DISABLED)
+            self.queue.put(("status", "Resuming..."))
+            self.queue.put(("text", "\nResuming processing...\n"))
+            return
+
+        if not self.file_list.get_children() or self.is_processing:
             return
         
+        # Fresh run
         self.is_processing = True
         self.should_stop = False
         self.is_paused = False
         self.start_time = time.time()
+        self.reset_progress_tracking()
+        # Recreate the task queue for this run
+        self.task_queue = queue.Queue()
+        self.worker_initial_model = self.model_var.get()
+        
+        # Snapshot pending files on the main thread and enqueue them
+        for item_id in self.file_list.get_children():
+            values = self.file_list.item(item_id)["values"]
+            self.enqueue_task_from_values(item_id, values)
+        
+        if self.total_tasks == 0:
+            self.queue.put(("status", "No pending files to process"))
+            self.is_processing = False
+            self.start_btn.configure(state=tk.NORMAL)
+            return
         
         # Update button states
         self.start_btn.configure(state=tk.DISABLED)
@@ -295,9 +360,9 @@ class TranscriptionApp:
         self.update_remaining_time()
         
         # Start processing in a separate thread
-        thread = threading.Thread(target=self.process_queue)
-        thread.daemon = True
-        thread.start()
+        self.worker_thread = threading.Thread(target=self.process_queue)
+        self.worker_thread.daemon = True
+        self.worker_thread.start()
 
     def toggle_pause(self):
         """Toggle pause state"""
@@ -339,80 +404,47 @@ class TranscriptionApp:
     def process_queue(self):
         """Process the file queue"""
         try:
-            # Load model once for all files
-            self.queue.put(("text", "Loading model...\n"))
-            current_model_name = self.model_var.get()
+            # Load model once initially; will swap if per-file model differs
+            self.queue.put(("text", "Initializing Whisper (first time startup, ~10-30 seconds)...\n"))
+            self.queue.put(("status", "Loading Whisper library..."))
+            current_model_name = getattr(self, "worker_initial_model", self.model_var.get())
             model = self.load_model(current_model_name)
             self.queue.put(("text", "Model loaded, starting transcription...\n\n"))
             
-            # Get all files from the queue
-            files = []
-            for item in self.file_list.get_children():
-                try:
-                    values = self.file_list.item(item)["values"]
-                    if len(values) < 6:  # Ensure we have all required values
-                        self.queue.put(("text", f"\nError: Invalid file entry in queue\n"))
-                        continue
-                        
-                    filename = values[0]
-                    status = values[1]
-                    include_timestamps = values[2] == "Yes"
-                    file_path = values[5]
-                    file_model = values[3]
-                    
-                    # Skip files that aren't ready for processing
-                    if status not in ["Pending"]:
-                        self.queue.put(("text", f"\nSkipping {status.lower()} file: {filename}\n"))
-                        self.queue.put(("file_status", (len(files), status)))
-                        continue
-                    
-                    # Convert to absolute path if needed
-                    file_path = os.path.abspath(file_path)
-                    
-                    # Verify file still exists and is accessible
-                    if not self.is_local_file(file_path):
-                        self.queue.put(("text", f"\nError: File is not accessible: {filename}\n"))
-                        self.queue.put(("file_status", (len(files), "Not Accessible")))
-                        continue
-                        
-                    # Verify file is a valid audio file
-                    try:
-                        import subprocess
-                        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
-                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-                        if result.returncode != 0:
-                            raise ValueError("Invalid audio file")
-                        duration = float(result.stdout.strip())
-                        if duration <= 0:
-                            raise ValueError("Invalid duration")
-                    except Exception as e:
-                        self.queue.put(("text", f"\nError: Invalid audio file: {filename}\n"))
-                        self.queue.put(("file_status", (len(files), "Invalid")))
-                        continue
-                        
-                    files.append((item, filename, include_timestamps, file_path, file_model))
-                except Exception as e:
-                    self.queue.put(("text", f"\nError processing queue entry: {str(e)}\n"))
-                    continue
-            
-            if not files:
-                self.queue.put(("text", "\nNo valid files to process\n"))
-                self.stop_processing()
-                return
+            pause_notified = False
+            while not self.should_stop:
+                # Respect pause requests
+                while self.is_paused and not self.should_stop:
+                    if not pause_notified:
+                        self.queue.put(("status", "Paused"))
+                        pause_notified = True
+                    time.sleep(0.1)
                 
-            total_files = len(files)
-            
-            for i, (item, filename, include_timestamps, file_path, file_model) in enumerate(files, 1):
                 if self.should_stop:
                     break
                 
-                # Update file status
-                self.queue.put(("file_status", (i-1, "Processing")))
+                pause_notified = False
                 
-                # Update progress
-                progress = (i/total_files) * 100
-                self.queue.put(("progress", progress))
-                self.queue.put(("status", f"Processing file {i} of {total_files}: {filename}"))
+                try:
+                    task = self.task_queue.get(timeout=0.1)
+                except queue.Empty:
+                    # Nothing left to do
+                    with self.progress_lock:
+                        if self.total_tasks == 0 or self.completed_tasks >= self.total_tasks:
+                            break
+                    continue
+                
+                item_id = task["item_id"]
+                filename = task["filename"]
+                include_timestamps = task["include_timestamps"]
+                file_path = task["file_path"]
+                file_model = task["file_model"]
+                
+                # Update file status
+                self.queue.put(("file_status", (item_id, "Processing")))
+                
+                # Update status/progress text
+                self.queue.put(("status", f"Processing: {filename}"))
                 self.queue.put(("text", f"\nStarting transcription of {filename}...\n"))
                 
                 try:
@@ -434,24 +466,31 @@ class TranscriptionApp:
                     total_minutes = int(duration / 60)
                     self.queue.put(("text", f"Audio length: {total_minutes} minutes\n"))
                     
-                    # Calculate estimated processing time based on model
+                    # Calculate estimated processing time based on model (best effort)
                     speed_factor = self.model_speeds[file_model]
                     est_minutes = int((duration / 60) / speed_factor)
                     
                     # Show model and processing info
                     self.queue.put(("text", f"Using {file_model} model\n"))
-                    self.queue.put(("text", f"Estimated processing time: {est_minutes} minutes\n"))
+                    self.queue.put(("text", f"Estimated processing time: {est_minutes} minutes (estimate may vary)\n"))
                     self.queue.put(("text", "Transcription in progress...\n"))
                     self.queue.put(("text", "This may take a while. The application will update when complete.\n\n"))
-                    
+
                     # Load the correct model for this file if different from current
                     if file_model != current_model_name:
                         self.queue.put(("text", f"Loading {file_model} model for this file...\n"))
                         model = self.load_model(file_model)
                         current_model_name = file_model
-                    
+
+                    # Start tracking elapsed time
+                    transcribe_start = time.time()
+                    self.queue.put(("transcribe_start", (filename, transcribe_start)))
+
                     # Transcribe file
                     result = model.transcribe(file_path)
+
+                    # Stop tracking elapsed time
+                    self.queue.put(("transcribe_end", None))
                     
                     # After transcription, format with timestamps if needed
                     if include_timestamps:
@@ -478,26 +517,29 @@ class TranscriptionApp:
                     self.queue.put(("status", f"Saved transcription to: {output_file}"))
                     
                     # Update file status
-                    self.queue.put(("file_status", (i-1, "Complete")))
+                    self.queue.put(("file_status", (item_id, "Complete")))
                     
                 except Exception as e:
                     error_msg = f"Error processing {filename}: {str(e)}"
                     self.queue.put(("text", f"\n=== {filename} ===\n{error_msg}\n"))
                     self.queue.put(("status", error_msg))
-                    self.queue.put(("file_status", (i-1, "Error")))
-                    continue  # Continue with next file instead of crashing
+                    self.queue.put(("file_status", (item_id, "Error")))
                 
-                # Check for pause
-                while self.is_paused and not self.should_stop:
-                    self.queue.put(("status", "Paused"))
-                    time.sleep(0.1)  # Reduce CPU usage while paused
-                    self.root.update()  # Keep UI responsive
-                    if self.should_stop:  # Check if stop was requested while paused
-                        break
+                finally:
+                    with self.progress_lock:
+                        self.completed_tasks += 1
+                        total = self.total_tasks
+                        completed = self.completed_tasks
+                    percent = int((completed / total) * 100) if total else 0
+                    self.queue.put(("progress", percent))
+                
+                # Check for stop or pause after each file
+                if self.should_stop:
+                    break
             
             if not self.should_stop:
                 self.queue.put(("status", "All transcriptions complete!"))
-            
+        
         except Exception as e:
             self.queue.put(("status", f"Error: {str(e)}"))
             self.queue.put(("text", f"\nError during processing: {str(e)}\n"))
@@ -506,14 +548,12 @@ class TranscriptionApp:
             self.is_processing = False
             self.is_paused = False  # Reset pause state
             self.start_time = None
-            self.queue.put(("progress", 0))
             # Reset button states
             self.queue.put(("button_state", ("start", tk.NORMAL)))
             self.queue.put(("button_state", ("pause", tk.DISABLED)))
             self.queue.put(("button_state", ("stop", tk.DISABLED)))
             self.queue.put(("button_state", ("select", tk.NORMAL)))
-            # Reset time display
-            self.update_total_time_estimate()
+            self.queue.put(("processing_complete", None))
 
     def select_files(self):
         """Open file dialog to select audio files"""
@@ -623,7 +663,7 @@ class TranscriptionApp:
                         continue
                     
                     # Add file to list with full path
-                    self.file_list.insert("", tk.END, values=(
+                    item_id = self.file_list.insert("", tk.END, values=(
                         filename,  # Display name
                         "Pending",  # Status
                         "Yes" if self.timestamps_var.get() else "No",  # Timestamps
@@ -631,6 +671,10 @@ class TranscriptionApp:
                         est_time,  # Estimated time
                         file_path  # Full path (hidden)
                     ))
+                    
+                    # If we're paused mid-run, enqueue the new task so it processes after resume
+                    if self.is_processing and self.is_paused:
+                        self.enqueue_task_from_values(item_id, self.file_list.item(item_id)["values"])
                     
                 except Exception as e:
                     self.queue.put(("text", f"\nError adding file {file_path}: {str(e)}\n"))
@@ -667,12 +711,20 @@ class TranscriptionApp:
             self.stop_btn.configure(state=tk.DISABLED)
             self.select_button.configure(state=tk.NORMAL)
 
+    def update_transcribe_elapsed_time(self):
+        """Update the elapsed time display during transcription"""
+        if self.transcribe_start_time and self.transcribe_filename:
+            elapsed = int(time.time() - self.transcribe_start_time)
+            self.status_label["text"] = f"Transcribing {self.transcribe_filename}... ({elapsed}s elapsed)"
+            # Schedule next update
+            self.transcribe_timer_id = self.root.after(1000, self.update_transcribe_elapsed_time)
+
     def check_queue(self):
         """Check the queue for updates"""
         try:
             while True:
                 msg_type, msg_data = self.queue.get_nowait()
-                
+
                 if msg_type == "text":
                     self.text_area.insert(tk.END, msg_data)
                     self.text_area.see(tk.END)
@@ -685,9 +737,27 @@ class TranscriptionApp:
                     self.model_progress_label["text"] = msg_data
                 elif msg_type == "status":
                     self.status_label["text"] = msg_data
+                elif msg_type == "transcribe_start":
+                    filename, start_time = msg_data
+                    self.transcribe_filename = filename
+                    self.transcribe_start_time = start_time
+                    # Cancel any existing timer
+                    if self.transcribe_timer_id:
+                        self.root.after_cancel(self.transcribe_timer_id)
+                    # Start the elapsed time updates
+                    self.update_transcribe_elapsed_time()
+                elif msg_type == "transcribe_end":
+                    # Cancel the elapsed time timer
+                    if self.transcribe_timer_id:
+                        self.root.after_cancel(self.transcribe_timer_id)
+                        self.transcribe_timer_id = None
+                    self.transcribe_start_time = None
+                    self.transcribe_filename = None
                 elif msg_type == "file_status":
-                    index, status = msg_data
-                    item = self.file_list.get_children()[index]
+                    item_id, status = msg_data
+                    if not self.file_list.exists(item_id):
+                        continue
+                    item = item_id
                     values = list(self.file_list.item(item)["values"])
                     values[1] = status
                     self.file_list.item(item, values=values)
@@ -706,11 +776,14 @@ class TranscriptionApp:
                         self.stop_btn.configure(state=state)
                     elif button == "select":
                         self.select_button.configure(state=state)
-                
+                elif msg_type == "processing_complete":
+                    # Reset time label since estimates are best-effort
+                    self.total_time_label["text"] = "Total estimated time: --:--"
+
                 self.queue.task_done()
         except queue.Empty:
             pass
-        
+
         # Schedule next check
         self.root.after(100, self.check_queue)
 
@@ -826,9 +899,12 @@ class TranscriptionApp:
     def load_model(self, model_name):
         """Load the Whisper model with download status"""
         try:
+            # Lazy import whisper to speed up GUI startup
+            import whisper
+
             # Get the model path in Whisper's cache
             model_path = os.path.expanduser(f"~/.cache/whisper/{model_name}.pt")
-            
+
             # Check if model exists
             if not os.path.exists(model_path):
                 self.queue.put(("show_model_progress", True))
@@ -836,7 +912,7 @@ class TranscriptionApp:
                 self.queue.put(("text", f"\nDownloading {model_name} model...\nThis is a one-time download. The model will be stored locally at:\n{model_path}\n\n"))
                 self.queue.put(("model_progress", 0))
                 self.queue.put(("model_progress_label", "Starting download..."))
-            
+
             # Load the model
             model = whisper.load_model(model_name)
             
