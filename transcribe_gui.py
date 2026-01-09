@@ -63,6 +63,7 @@ class TranscriptionApp:
         self.start_time = None
         self.total_elapsed_seconds = 0
         self.pause_start_time = None
+        self.processing_completed = False
         self.transcribe_start_time = None
         self.transcribe_filename = None
         self.transcribe_timer_id = None
@@ -413,6 +414,7 @@ class TranscriptionApp:
         self.is_paused = False
         self.total_elapsed_seconds = 0
         self.pause_start_time = None
+        self.processing_completed = False
         self.start_time = time.time()
         self.reset_progress_tracking()
         # Recreate the task queue for this run
@@ -482,6 +484,7 @@ class TranscriptionApp:
         self.start_time = None
         self.total_elapsed_seconds = 0
         self.pause_start_time = None
+        self.processing_completed = False
         self.elapsed_time_label["text"] = "Elapsed: 0s"
         
         # Update button states
@@ -808,10 +811,9 @@ class TranscriptionApp:
             self.select_button.configure(state=tk.NORMAL)
 
     def update_transcribe_elapsed_time(self):
-        """Update the elapsed time display during transcription"""
+        """Update the status display during transcription (elapsed time removed per user request)"""
         if self.transcribe_start_time and self.transcribe_filename:
-            elapsed = int(time.time() - self.transcribe_start_time)
-            self.status_label["text"] = f"Transcribing {self.transcribe_filename}... ({elapsed}s elapsed)"
+            self.status_label["text"] = f"Transcribing {self.transcribe_filename}..."
             # Schedule next update
             self.transcribe_timer_id = self.root.after(1000, self.update_transcribe_elapsed_time)
 
@@ -877,8 +879,9 @@ class TranscriptionApp:
                     self.device_combo.configure(state=device_state)
                     self.compute_combo.configure(state=compute_state)
                 elif msg_type == "processing_complete":
-                    # Keep showing elapsed time
-                    pass
+                    # Processing completed naturally - show "Done!"
+                    self.processing_completed = True
+                    self.elapsed_time_label["text"] = "Done!"
 
                 self.queue.task_done()
         except queue.Empty:
@@ -1059,6 +1062,10 @@ class TranscriptionApp:
             self.elapsed_time_label["text"] = f"Elapsed: {elapsed}s"
             # Keep updating as long as start_time is set
             self.root.after(1000, self.update_remaining_time)
+        elif hasattr(self, 'processing_completed') and self.processing_completed:
+            # Processing finished naturally - show "Done!"
+            self.elapsed_time_label["text"] = "Done!"
+            self.processing_completed = False  # Reset flag
 
     def load_model(self, model_name, device=None, compute_type=None):
         """Load the faster-whisper model with download status"""
