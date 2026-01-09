@@ -10,6 +10,33 @@ import os
 import librosa
 from typing import List, Dict
 import time
+import platform
+import sys
+
+# --- Environment sanity checks for macOS/Torch ---------------------------------
+# If running on Apple Silicon ensure a native arm64 build of PyTorch is present.
+# x86-64 wheels executed via Rosetta crash with a misleading loader error.
+# We intercept that scenario to display actionable instructions instead.
+
+def _check_pytorch_arch():
+    try:
+        import torch  # noqa: F401 – we only need the import side-effects
+    except OSError as exc:
+        if "have instead 16" in str(exc) and platform.machine() == "arm64":
+            sys.stderr.write(
+                "\n🚫 Detected x86-64 PyTorch wheel running under Rosetta.\n"
+                "Please reinstall the native arm64 wheel:\n\n"
+                "    pip uninstall -y torch\n"
+                "    pip install --no-cache-dir --force-reinstall torch==2.1.0 "
+                "--index-url https://download.pytorch.org/whl/cpu\n\n"
+                "Then run the program again.\n"
+            )
+            sys.exit(1)
+    except ModuleNotFoundError:
+        # torch not installed – setup is still in progress; skip check
+        pass
+
+_check_pytorch_arch()
 
 class TranscriptionApp:
     def __init__(self, root):
@@ -33,9 +60,9 @@ class TranscriptionApp:
         self.completed_tasks = 0
         
         # Time tracking
-        self.remaining_time = 0
-        self.total_time = 0
         self.start_time = None
+        self.total_elapsed_seconds = 0
+        self.pause_start_time = None
         self.transcribe_start_time = None
         self.transcribe_filename = None
         self.transcribe_timer_id = None
@@ -49,6 +76,16 @@ class TranscriptionApp:
             "large-v3": 0.6   # ~0.6x real-time
         }
         self.model_speeds = dict(self.base_model_speeds)
+        # On Apple-silicon with int8 inference the effective speed is much faster.
+        import platform
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            self.model_speeds = {
+                "tiny": 15.0,
+                "base": 10.0,
+                "small": 6.0,
+                "medium": 4.0,
+                "large-v3": 2.0,
+            }
         
         # Create main frame
         self.main_frame = ttk.Frame(root, padding="10")
@@ -142,7 +179,7 @@ class TranscriptionApp:
         # File list
         self.file_list = ttk.Treeview(
             self.file_list_frame,
-            columns=("filename", "status", "timestamps", "model", "est_time"),
+            columns=("filename", "status", "timestamps", "model"),
             show="headings",
             height=10
         )
@@ -150,12 +187,10 @@ class TranscriptionApp:
         self.file_list.heading("status", text="Status")
         self.file_list.heading("timestamps", text="Timestamps")
         self.file_list.heading("model", text="Model")
-        self.file_list.heading("est_time", text="Est. Time")
-        self.file_list.column("filename", width=150)
-        self.file_list.column("status", width=100)
-        self.file_list.column("timestamps", width=80)
-        self.file_list.column("model", width=80)
-        self.file_list.column("est_time", width=80)
+        self.file_list.column("filename", width=200)
+        self.file_list.column("status", width=120)
+        self.file_list.column("timestamps", width=100)
+        self.file_list.column("model", width=100)
         self.file_list.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Enable drag and drop
@@ -172,9 +207,10 @@ class TranscriptionApp:
         self.file_list_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self.file_list.configure(yscrollcommand=self.file_list_scrollbar.set)
         
-        # Total time estimate label
-        self.total_time_label = ttk.Label(self.file_list_frame, text="Total estimated time: --:--")
+        # Time label removed per user request
+        self.total_time_label = ttk.Label(self.file_list_frame, text="")
         self.total_time_label.grid(row=2, column=0, columnspan=2, pady=5)
+        self.total_time_label.grid_remove()
         
         # File list buttons frame
         self.file_buttons_frame = ttk.Frame(self.file_list_frame)
@@ -230,6 +266,10 @@ class TranscriptionApp:
         )
         self.stop_btn.grid(row=0, column=2, padx=2)
         
+        # Elapsed time label near control buttons
+        self.elapsed_time_label = ttk.Label(self.control_frame, text="Elapsed: 0s")
+        self.elapsed_time_label.grid(row=0, column=3, padx=10)
+        
         # Transcription text area
         self.text_area = scrolledtext.ScrolledText(
             self.right_frame,
@@ -257,11 +297,10 @@ class TranscriptionApp:
         self.model_progress_label = ttk.Label(self.model_progress_frame, text="")
         self.model_progress_label.grid(row=0, column=1)
         
-        # File progress frame
-        self.progress_frame = ttk.LabelFrame(self.right_frame, text="File Processing Progress", padding="5")
+        # Hidden progress bar (kept for internal state updates)
+        self.progress_frame = ttk.Frame(self.right_frame)
         self.progress_frame.grid(row=2, column=0, pady=5, sticky=(tk.W, tk.E))
-        
-        # File progress bar
+        self.progress_frame.grid_remove()
         self.progress = ttk.Progressbar(
             self.progress_frame,
             orient=tk.HORIZONTAL,
@@ -269,8 +308,6 @@ class TranscriptionApp:
             mode='determinate'
         )
         self.progress.grid(row=0, column=0, padx=(0, 10), sticky=(tk.W, tk.E))
-        
-        # File progress label
         self.progress_label = ttk.Label(self.progress_frame, text="0%")
         self.progress_label.grid(row=0, column=1)
         
@@ -304,14 +341,16 @@ class TranscriptionApp:
         with self.progress_lock:
             self.total_tasks = 0
             self.completed_tasks = 0
-        self.progress["value"] = 0
-        self.progress_label["text"] = "0%"
+        if hasattr(self, 'progress'):
+            self.progress["value"] = 0
+        if hasattr(self, 'progress_label'):
+            self.progress_label["text"] = "0%"
 
     def enqueue_task_from_values(self, item_id, values):
         """Push a pending file into the worker queue"""
-        if len(values) < 6:
+        if len(values) < 5:
             return
-        filename, status, timestamps_flag, file_model, _, file_path = values
+        filename, status, timestamps_flag, file_model, file_path = values
         if status != "Pending":
             return
         include_timestamps = timestamps_flag == "Yes"
@@ -339,8 +378,6 @@ class TranscriptionApp:
         for item in selected:
             self.file_list.delete(item)
         
-        # Update total time estimate
-        self.update_total_time_estimate()
 
     def toggle_selected_timestamps(self):
         """Toggle timestamps for selected file"""
@@ -374,6 +411,8 @@ class TranscriptionApp:
         self.is_processing = True
         self.should_stop = False
         self.is_paused = False
+        self.total_elapsed_seconds = 0
+        self.pause_start_time = None
         self.start_time = time.time()
         self.reset_progress_tracking()
         # Recreate the task queue for this run
@@ -402,7 +441,7 @@ class TranscriptionApp:
         self.device_combo.configure(state=tk.DISABLED)
         self.compute_combo.configure(state=tk.DISABLED)
         
-        # Start the remaining time updates
+        # Start the elapsed time updates
         self.update_remaining_time()
         
         # Start processing in a separate thread
@@ -416,13 +455,19 @@ class TranscriptionApp:
         self.pause_btn.configure(text="Resume" if self.is_paused else "Pause")
         
         if self.is_paused:
-            self.start_time = None
+            # Pause - accumulate elapsed time
+            if self.start_time:
+                self.total_elapsed_seconds += int(time.time() - self.start_time)
+                self.pause_start_time = time.time()
             # Enable file selection when paused
             self.select_button.configure(state=tk.NORMAL)
             self.queue.put(("status", "Paused - You can add more files"))
             self.queue.put(("text", "\nProcessing paused. You can add more files or click 'Resume' to continue.\n"))
         else:
-            # Reset start time when resuming
+            # Resume - restart timer from where we left off
+            if self.pause_start_time:
+                # Don't add pause time to elapsed
+                self.pause_start_time = None
             self.start_time = time.time()
             # Disable file selection when resuming
             self.select_button.configure(state=tk.DISABLED)
@@ -435,6 +480,9 @@ class TranscriptionApp:
         self.is_processing = False
         self.is_paused = False
         self.start_time = None
+        self.total_elapsed_seconds = 0
+        self.pause_start_time = None
+        self.elapsed_time_label["text"] = "Elapsed: 0s"
         
         # Update button states
         self.start_btn.configure(state=tk.NORMAL)
@@ -518,13 +566,8 @@ class TranscriptionApp:
                     total_minutes = int(duration / 60)
                     self.queue.put(("text", f"Audio length: {total_minutes} minutes\n"))
                     
-                    # Calculate estimated processing time based on model (best effort)
-                    speed_factor = self.worker_model_speeds[file_model]
-                    est_minutes = int((duration / 60) / speed_factor)
-                    
                     # Show model and processing info
                     self.queue.put(("text", f"Using {file_model} model\n"))
-                    self.queue.put(("text", f"Estimated processing time: {est_minutes} minutes (estimate may vary)\n"))
                     self.queue.put(("text", "Transcription in progress...\n"))
                     self.queue.put(("text", "This may take a while. The application will update when complete.\n\n"))
 
@@ -670,7 +713,6 @@ class TranscriptionApp:
                             "Not Accessible",  # Status
                             "Yes" if self.timestamps_var.get() else "No",  # Timestamps
                             self.model_var.get(),  # Model
-                            "--:--",  # Estimated time
                             file_path  # Full path (hidden)
                         ))
                         continue
@@ -690,10 +732,6 @@ class TranscriptionApp:
                         if duration <= 0:
                             raise ValueError("Invalid duration")
                             
-                        total_minutes = int(duration / 60)
-                        speed_factor = self.model_speeds[self.model_var.get()]
-                        est_minutes = int((duration / 60) / speed_factor)
-                        est_time = self.format_time_estimate(est_minutes)
                     except (subprocess.TimeoutExpired, ValueError, subprocess.CalledProcessError) as e:
                         self.queue.put(("text", f"\nWarning: Invalid audio file: {filename}\n"))
                         self.queue.put(("text", "This file appears to be corrupted or is not a valid audio file.\n\n"))
@@ -704,7 +742,6 @@ class TranscriptionApp:
                             "Invalid",  # Status
                             "Yes" if self.timestamps_var.get() else "No",  # Timestamps
                             self.model_var.get(),  # Model
-                            "--:--",  # Estimated time
                             file_path  # Full path (hidden)
                         ))
                         continue
@@ -718,7 +755,6 @@ class TranscriptionApp:
                             "Error",  # Status
                             "Yes" if self.timestamps_var.get() else "No",  # Timestamps
                             self.model_var.get(),  # Model
-                            "--:--",  # Estimated time
                             file_path  # Full path (hidden)
                         ))
                         continue
@@ -729,7 +765,6 @@ class TranscriptionApp:
                         "Pending",  # Status
                         "Yes" if self.timestamps_var.get() else "No",  # Timestamps
                         self.model_var.get(),  # Model
-                        est_time,  # Estimated time
                         file_path  # Full path (hidden)
                     ))
                     
@@ -742,12 +777,10 @@ class TranscriptionApp:
                     continue
             
             # Reset progress if not processing
-            if not self.is_processing:
+            if not self.is_processing and hasattr(self, 'progress'):
                 self.progress["value"] = 0
-                self.progress_label["text"] = "0%"
-            
-            # Update total time estimate
-            self.update_total_time_estimate()
+                if hasattr(self, 'progress_label'):
+                    self.progress_label["text"] = "0%"
             
             # Show model info only if not processing
             if not self.is_processing:
@@ -765,8 +798,10 @@ class TranscriptionApp:
             self.is_processing = False
             self.is_paused = False
             self.start_time = None
-            self.progress["value"] = 0
-            self.progress_label["text"] = "0%"
+            if hasattr(self, 'progress'):
+                self.progress["value"] = 0
+            if hasattr(self, 'progress_label'):
+                self.progress_label["text"] = "0%"
             self.start_btn.configure(state=tk.NORMAL)
             self.pause_btn.configure(state=tk.DISABLED)
             self.stop_btn.configure(state=tk.DISABLED)
@@ -842,8 +877,8 @@ class TranscriptionApp:
                     self.device_combo.configure(state=device_state)
                     self.compute_combo.configure(state=compute_state)
                 elif msg_type == "processing_complete":
-                    # Reset time label since estimates are best-effort
-                    self.total_time_label["text"] = "Total estimated time: --:--"
+                    # Keep showing elapsed time
+                    pass
 
                 self.queue.task_done()
         except queue.Empty:
@@ -874,13 +909,11 @@ class TranscriptionApp:
         """Update compute options and time estimates when device changes"""
         self.refresh_compute_options()
         self.update_speed_factors()
-        self.refresh_estimates_for_queue()
         self.show_model_info()
 
     def on_compute_change(self, event=None):
         """Update time estimates when compute type changes"""
         self.update_speed_factors()
-        self.refresh_estimates_for_queue()
         self.show_model_info()
 
     def refresh_compute_options(self):
@@ -937,27 +970,9 @@ class TranscriptionApp:
         }
 
     def refresh_estimates_for_queue(self):
-        """Recalculate estimates for pending files based on current speed factors"""
-        for item in self.file_list.get_children():
-            values = list(self.file_list.item(item)["values"])
-            if len(values) < 6:
-                continue
-            status = values[1]
-            file_model = values[3]
-            file_path = values[5]
-            if status != "Pending":
-                continue
-            try:
-                duration = librosa.get_duration(path=file_path)
-                total_minutes = int(duration / 60)
-                speed_factor = self.model_speeds[file_model]
-                est_minutes = int((duration / 60) / speed_factor)
-                values[4] = self.format_time_estimate(est_minutes)
-                self.file_list.item(item, values=values)
-            except Exception:
-                values[4] = "--:--"
-                self.file_list.item(item, values=values)
-        self.update_total_time_estimate()
+        """Recalculate estimates (removed - estimates were inaccurate)"""
+        # Estimates removed per user request
+        pass
 
     def show_model_info(self):
         """Show information about the selected model"""
@@ -985,22 +1000,16 @@ class TranscriptionApp:
             if os.path.isdir(model_path):
                 downloaded_models.append(model)
         
-        # Update status
-        device_label = self.device_var.get()
-        compute_label = self.compute_var.get()
-        self.status_label["text"] = (
-            f"Selected model: {model_name} ({model_sizes[model_name]}), "
-            f"{device_label}, {compute_label}"
-        )
+        # Update status (model info removed per user request)
+        if not self.is_processing:
+            self.status_label["text"] = "Ready"
         
         # Only show full info in text area if it's empty
         if not self.text_area.get(1.0, tk.END).strip():
             # Build model info text
-            info_text = f"Selected model: {model_name}\n"
+            info_text = ""
             info_text += f"Size: {model_sizes[model_name]}\n"
             info_text += f"Use case: {model_use_cases[model_name]}\n"
-            info_text += f"Device: {device_label}\n"
-            info_text += f"Compute: {compute_label}\n"
             info_text += "The model will be downloaded and run locally with faster-whisper.\n\n"
             
             # Add downloaded models info
@@ -1034,31 +1043,21 @@ class TranscriptionApp:
         return f"{hours:02d}:{mins:02d}"
 
     def update_total_time_estimate(self):
-        """Update the total time estimate based on all files"""
-        total_minutes = 0
-        for item in self.file_list.get_children():
-            values = self.file_list.item(item)["values"]
-            if len(values) >= 5 and values[4] != "--:--":
-                try:
-                    hours, minutes = map(int, values[4].split(":"))
-                    total_minutes += hours * 60 + minutes
-                except ValueError:
-                    continue
-        
-        self.total_time = total_minutes
-        if not self.is_processing:
-            self.remaining_time = total_minutes
-            self.total_time_label["text"] = f"Total estimated time: {self.format_time_estimate(total_minutes)}"
+        """Update the total time estimate (removed - estimates were inaccurate)"""
+        # Estimates removed per user request
+        pass
 
     def update_remaining_time(self):
-        """Update the remaining time display"""
-        if self.is_processing and not self.is_paused and self.start_time:
-            elapsed_minutes = (time.time() - self.start_time) / 60
-            self.remaining_time = max(0, self.total_time - elapsed_minutes)
-            self.total_time_label["text"] = f"Time remaining: {self.format_time_estimate(int(self.remaining_time))}"
-        
-        # Schedule next update
-        if self.is_processing:
+        """Update the elapsed time display near control buttons"""
+        if self.start_time:
+            if self.is_paused and self.pause_start_time:
+                # Paused - use accumulated time
+                elapsed = self.total_elapsed_seconds
+            else:
+                # Running - calculate from start
+                elapsed = int(time.time() - self.start_time) + self.total_elapsed_seconds
+            self.elapsed_time_label["text"] = f"Elapsed: {elapsed}s"
+            # Keep updating as long as start_time is set
             self.root.after(1000, self.update_remaining_time)
 
     def load_model(self, model_name, device=None, compute_type=None):
@@ -1079,11 +1078,18 @@ class TranscriptionApp:
                 self.queue.put(("model_progress_label", "Starting download..."))
 
             # Load the model
-            model = WhisperModel(
-                model_name,
-                device=device or "auto",
-                compute_type=compute_type
-            )
+            # Build keyword arguments only for values the CTranslate2 binding accepts
+            # Force stable CPU/int8 when user selects 'Auto' on macOS arm64 to avoid Metal seg-faults
+            import platform
+            if (device or "auto") == "auto" and platform.system() == "Darwin" and platform.machine() == "arm64":
+                kwargs = {"device": "cpu", "compute_type": "int8"}
+            else:
+                kwargs = {"device": device or "auto"}
+            if compute_type:
+                # Only pass compute_type if the caller set it; None breaks the C++ binding
+                kwargs["compute_type"] = compute_type
+
+            model = WhisperModel(model_name, **kwargs)
             
             self.queue.put(("model_progress", 100))
             self.queue.put(("model_progress_label", "Complete"))
@@ -1129,31 +1135,18 @@ class TranscriptionApp:
             for item in selected:
                 try:
                     values = list(self.file_list.item(item)["values"])
-                    if len(values) < 6:  # Ensure we have all required values
+                    if len(values) < 5:  # Ensure we have all required values
                         continue
                         
                     status = values[1]
                     # Only change model for pending files
                     if status == "Pending":
-                        try:
-                            duration = librosa.get_duration(path=values[5])
-                            total_minutes = int(duration / 60)
-                            speed_factor = self.model_speeds[new_model]
-                            est_minutes = int((duration / 60) / speed_factor)
-                            values[3] = new_model  # Update model
-                            values[4] = self.format_time_estimate(est_minutes)  # Update time estimate
-                            self.file_list.item(item, values=values)
-                        except Exception as e:
-                            print(f"Error updating time estimate: {e}")
-                            values[3] = new_model
-                            values[4] = "--:--"
-                            self.file_list.item(item, values=values)
+                        values[3] = new_model  # Update model
+                        self.file_list.item(item, values=values)
                 except Exception as e:
                     print(f"Error processing item: {e}")
                     continue
             
-            # Update total time estimate
-            self.update_total_time_estimate()
             dialog.destroy()
         
         # Add buttons

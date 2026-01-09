@@ -1,148 +1,77 @@
 # WhisprBatch
 
-A Python-based GUI application for transcribing audio files using faster-whisper models. This tool provides a user-friendly interface for batch processing audio files with flexible settings and real-time progress tracking.
+A Python-based GUI application for transcribing audio files using [faster-whisper](https://github.com/Systran/faster-whisper). The tool provides a user-friendly interface for batch processing audio files with flexible settings and real-time progress tracking.
 
-## Known issues
+---
 
-- **iCloud Drive undownloaded files**: files that are not 100% local on your computer will crash the program.
+## Highlights
+- **Multiple Model Support** – tiny, base, small, medium, large-v3
+- **Batch Queue** – add/reorder/remove files while paused
+- **Progress & ETA** – per-file status plus global remaining-time estimate
+- **Timestamps** – optional per-segment timecodes
+- **Cross-platform** – macOS, Linux, Windows (Python ≥ 3.8)
 
-## Features
+---
 
-- **Multiple Model Support**: Choose from different Whisper models (tiny, base, small, medium, large-v3) based on your needs
-- **Batch Processing**: Process multiple audio files in a queue
-- **Flexible File Management**:
-  - Add files at any time (even during processing when paused)
-  - Drag and drop to reorder files in the queue
-  - Remove files from the queue
-  - Individual model selection for each file
-  - Individual timestamp settings for each file
-- **Processing Controls**:
-  - Start/Pause/Resume/Stop functionality
-  - Real-time progress tracking
-  - Estimated time remaining
-  - Pause to add more files
-- **Output Options**:
-  - Optional timestamps for each segment
-  - Saves transcriptions in the same directory as source files
-  - Clear progress and status updates
+## Quick-start (all platforms)
+```bash
+# clone project
+cd AudioTranscribe
+
+# one-step setup (creates .venv, installs deps, handles Apple-silicon quirks)
+chmod +x setup.sh
+./setup.sh
+
+# activate env & run GUI
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python transcribe_gui.py
+```
+
+---
+
+## Apple-Silicon notes (M-series Macs)
+1. The setup script auto-detects arm64 and ensures the **native** PyTorch CPU wheel is installed (`torch==2.1.0`).
+2. When you choose **Device = Auto** (default) the program now *automatically falls back* to **CPU + int8** compute-type. This avoids current CTranslate2/Metal seg-faults while still running ~2× real-time on an M1/M2/M3.
+3. Once a stable CTranslate2 Metal backend is released the GUI will switch back to GPU automatically.
+
+If you ever see the linker error below you are running an x86-64 wheel under Rosetta:
+```
+macOS 26 (2601) or later required, have instead 16 (1601) !
+```
+Fix with:
+```bash
+pip uninstall -y torch
+pip install --no-cache-dir --force-reinstall torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+```
+
+---
 
 ## Requirements
-
-- Python 3.8 or higher
-- FFmpeg installed on your system
-- Required Python packages (install via `pip install -r requirements.txt`):
+- Python 3.8 – 3.12 (3.13 currently lacks binary wheels for NumPy/PyTorch)
+- FFmpeg in PATH
+- Required pip packages (installed by `setup.sh`):
   - faster-whisper
-  - tkinter
-  - librosa
-  - numpy
+  - torch (CPU wheel by default)
+  - librosa, numpy, tqdm, requests
 
-## Installation
+---
 
-1. Clone this repository:
-   ```bash
-   git clone [repository-url]
-   cd [repository-name]
-   ```
+## Running headless CLI
+Batch-transcribe an entire directory without the GUI:
+```bash
+python transcribe_audio.py /path/to/folder --model base
+```
+(Add `--no-timestamps` to disable timestamps.)
 
-2. Create and activate a virtual environment:
-   ```bash
-   # Create virtual environment
-   python -m venv venv
-
-   # Activate virtual environment
-   # On macOS/Linux:
-   source venv/bin/activate
-   # On Windows:
-   .\venv\Scripts\activate
-   ```
-
-3. Install required packages:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Ensure FFmpeg is installed on your system:
-   - macOS: `brew install ffmpeg`
-   - Ubuntu/Debian: `sudo apt-get install ffmpeg`
-   - Windows: Download from [FFmpeg website](https://ffmpeg.org/download.html)
-
-## Running the Application
-
-1. Make sure you're in the project directory and your virtual environment is activated:
-   ```bash
-   cd [repository-name]
-   source venv/bin/activate  # On macOS/Linux
-   # or
-   .\venv\Scripts\activate  # On Windows
-   ```
-
-2. Run the application:
-   ```bash
-   python transcribe_gui.py
-   ```
-
-3. The GUI will open and you can start using the application.
-
-## Usage
-
-1. **Add Audio Files**:
-   - Click "Add Audio Files" to select one or more audio files
-   - Files will be added to the queue with default settings
-   - You can add more files at any time when processing is paused
-
-2. **Configure Settings**:
-   - Select default model (tiny, base, small, medium, large-v3)
-   - Toggle default timestamps setting
-   - Individual files can have their own model and timestamp settings
-
-3. **File Queue Management**:
-   - Drag and drop files to reorder them
-   - Select files and use "Remove" to delete them from the queue
-   - Use "Toggle Timestamps" to change timestamp settings for selected files
-   - Use "Change Model" to set different models for selected files
-   - All changes can be made while processing is paused
-
-4. **Processing Controls**:
-   - Click "Start" to begin processing the queue
-   - Use "Pause" to temporarily stop processing
-   - While paused, you can:
-     - Add more files
-     - Reorder the queue
-     - Change file settings
-   - Click "Resume" to continue processing
-   - Use "Stop" to end processing completely
-
-5. **Monitor Progress**:
-   - View real-time progress in the progress bar
-   - See estimated time remaining
-   - Check status updates for each file
-   - View completion messages and output file locations
-
-## Model Information
-
-- **tiny**: ~75MB download, ~1GB in memory
-  - Best for: Quick transcriptions, short audio, clear speech, English only
-- **base**: ~142MB download, ~1GB in memory
-  - Best for: General purpose, good balance of speed and accuracy
-- **small**: ~466MB download, ~2GB in memory
-  - Best for: Multiple languages, moderate accuracy needed
-- **medium**: ~1.5GB download, ~5GB in memory
-  - Best for: Complex audio, multiple speakers, high accuracy needed
-- **large-v3**: ~3GB download, ~10GB in memory
-  - Best for: Professional use, maximum accuracy, complex audio
-
-## Notes
-
-- Models are downloaded and stored locally in `~/.cache/huggingface/hub/`
-- Processing speed varies by model and hardware
-- Each file can have its own model and timestamp settings
-- Files can be added to the queue at any time when processing is paused
-- The application will automatically switch models when processing files with different model settings
-- Estimated processing times are approximate and may vary based on your system
+---
 
 ## Troubleshooting
+| Issue | Fix |
+|-------|-----|
+| `ModuleNotFoundError: _tkinter` | Reinstall Homebrew `python@3.x` **after** `brew install tcl-tk`, or use `/usr/bin/python3`. |
+| `macOS 26 / 16` loader abort | You installed an x86-64 PyTorch wheel – reinstall arm64 CPU wheel (see above). |
+| Segmentation fault on model load | Automatically mitigated by CPU fallback; update faster-whisper & CTranslate2 when new GPU wheels land. |
 
-- If you encounter any issues with FFmpeg, ensure it's properly installed and accessible in your system's PATH
-- For memory issues, try using a smaller model or processing fewer files at once
-- If the application becomes unresponsive, use the Stop button and restart processing
-- Check the status messages for any error information
+---
+
+MIT License © 2026
