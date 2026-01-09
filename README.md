@@ -1,6 +1,6 @@
 # WhisprBatch
 
-A Python-based GUI application for transcribing audio files using OpenAI's local Whisper models. This tool provides a user-friendly interface for batch processing audio files with flexible settings and real-time progress tracking.
+A Python-based GUI application for transcribing audio files using faster-whisper models. This tool provides a user-friendly interface for batch processing audio files with flexible settings and real-time progress tracking.
 
 ## Known issues
 
@@ -31,11 +31,10 @@ A Python-based GUI application for transcribing audio files using OpenAI's local
 - Python 3.8 or higher
 - FFmpeg installed on your system
 - Required Python packages (install via `pip install -r requirements.txt`):
-  - openai-whisper
+  - faster-whisper
   - tkinter
   - librosa
   - numpy
-  - torch
 
 ## Installation
 
@@ -134,7 +133,7 @@ A Python-based GUI application for transcribing audio files using OpenAI's local
 
 ## Notes
 
-- Models are downloaded and stored locally in `~/.cache/whisper/`
+- Models are downloaded and stored locally in `~/.cache/huggingface/hub/`
 - Processing speed varies by model and hardware
 - Each file can have its own model and timestamp settings
 - Files can be added to the queue at any time when processing is paused

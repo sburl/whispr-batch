@@ -40,14 +40,15 @@ class TranscriptionApp:
         self.transcribe_filename = None
         self.transcribe_timer_id = None
         
-        # Model speeds for time estimation
-        self.model_speeds = {
+        # Base model speeds for time estimation (CPU float32 baseline)
+        self.base_model_speeds = {
             "tiny": 2.5,      # ~2.5x real-time
             "base": 2.0,      # ~2x real-time
             "small": 1.5,     # ~1.5x real-time
             "medium": 1.0,    # ~1x real-time
             "large-v3": 0.6   # ~0.6x real-time
         }
+        self.model_speeds = dict(self.base_model_speeds)
         
         # Create main frame
         self.main_frame = ttk.Frame(root, padding="10")
@@ -85,6 +86,46 @@ class TranscriptionApp:
             variable=self.timestamps_var
         )
         self.timestamps_check.grid(row=0, column=2, padx=5)
+
+        # Device selection
+        ttk.Label(self.options_frame, text="Device:").grid(row=1, column=0, padx=5, pady=(5, 0))
+        self.device_options = {
+            "Auto (recommended)": "auto",
+            "CPU": "cpu",
+            "CUDA (NVIDIA GPU)": "cuda"
+        }
+        self.device_var = tk.StringVar(value="Auto (recommended)")
+        self.device_combo = ttk.Combobox(
+            self.options_frame,
+            textvariable=self.device_var,
+            values=list(self.device_options.keys()),
+            state="readonly",
+            width=18
+        )
+        self.device_combo.grid(row=1, column=1, padx=5, pady=(5, 0), sticky=tk.W)
+        self.device_combo.bind('<<ComboboxSelected>>', self.on_device_change)
+
+        # Compute type selection
+        ttk.Label(self.options_frame, text="Compute:").grid(row=1, column=2, padx=5, pady=(5, 0))
+        self.compute_label_to_type = {
+            "Auto (recommended)": None,
+            "Fast (float16)": "float16",
+            "Balanced (int8_float16)": "int8_float16",
+            "Memory Saver (int8)": "int8",
+            "Precise (float32)": "float32"
+        }
+        self.compute_var = tk.StringVar(value="Auto (recommended)")
+        self.compute_combo = ttk.Combobox(
+            self.options_frame,
+            textvariable=self.compute_var,
+            values=[],
+            state="readonly",
+            width=22
+        )
+        self.compute_combo.grid(row=1, column=3, padx=5, pady=(5, 0), sticky=tk.W)
+        self.compute_combo.bind('<<ComboboxSelected>>', self.on_compute_change)
+        self.refresh_compute_options()
+        self.update_speed_factors()
         
         # File selection button
         self.select_button = ttk.Button(
@@ -338,6 +379,9 @@ class TranscriptionApp:
         # Recreate the task queue for this run
         self.task_queue = queue.Queue()
         self.worker_initial_model = self.model_var.get()
+        self.worker_device = self.get_selected_device()
+        self.worker_compute_type = self.get_selected_compute_type()
+        self.worker_model_speeds = dict(self.model_speeds)
         
         # Snapshot pending files on the main thread and enqueue them
         for item_id in self.file_list.get_children():
@@ -355,6 +399,8 @@ class TranscriptionApp:
         self.pause_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.NORMAL)
         self.select_button.configure(state=tk.DISABLED)
+        self.device_combo.configure(state=tk.DISABLED)
+        self.compute_combo.configure(state=tk.DISABLED)
         
         # Start the remaining time updates
         self.update_remaining_time()
@@ -395,6 +441,8 @@ class TranscriptionApp:
         self.pause_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.DISABLED)
         self.select_button.configure(state=tk.NORMAL)
+        self.device_combo.configure(state="readonly")
+        self.compute_combo.configure(state="readonly")
         
         # Reset time display
         self.update_total_time_estimate()
@@ -405,10 +453,14 @@ class TranscriptionApp:
         """Process the file queue"""
         try:
             # Load model once initially; will swap if per-file model differs
-            self.queue.put(("text", "Initializing Whisper (first time startup, ~10-30 seconds)...\n"))
-            self.queue.put(("status", "Loading Whisper library..."))
+            self.queue.put(("text", "Initializing faster-whisper (first time startup, ~10-30 seconds)...\n"))
+            self.queue.put(("status", "Loading faster-whisper library..."))
             current_model_name = getattr(self, "worker_initial_model", self.model_var.get())
-            model = self.load_model(current_model_name)
+            model = self.load_model(
+                current_model_name,
+                device=getattr(self, "worker_device", self.get_selected_device()),
+                compute_type=getattr(self, "worker_compute_type", self.get_selected_compute_type())
+            )
             self.queue.put(("text", "Model loaded, starting transcription...\n\n"))
             
             pause_notified = False
@@ -467,7 +519,7 @@ class TranscriptionApp:
                     self.queue.put(("text", f"Audio length: {total_minutes} minutes\n"))
                     
                     # Calculate estimated processing time based on model (best effort)
-                    speed_factor = self.model_speeds[file_model]
+                    speed_factor = self.worker_model_speeds[file_model]
                     est_minutes = int((duration / 60) / speed_factor)
                     
                     # Show model and processing info
@@ -479,7 +531,11 @@ class TranscriptionApp:
                     # Load the correct model for this file if different from current
                     if file_model != current_model_name:
                         self.queue.put(("text", f"Loading {file_model} model for this file...\n"))
-                        model = self.load_model(file_model)
+                        model = self.load_model(
+                            file_model,
+                            device=self.worker_device,
+                            compute_type=self.worker_compute_type
+                        )
                         current_model_name = file_model
 
                     # Start tracking elapsed time
@@ -487,7 +543,10 @@ class TranscriptionApp:
                     self.queue.put(("transcribe_start", (filename, transcribe_start)))
 
                     # Transcribe file
-                    result = model.transcribe(file_path)
+                    segments, _info = model.transcribe(
+                        file_path,
+                        task="transcribe"
+                    )
 
                     # Stop tracking elapsed time
                     self.queue.put(("transcribe_end", None))
@@ -495,14 +554,15 @@ class TranscriptionApp:
                     # After transcription, format with timestamps if needed
                     if include_timestamps:
                         formatted_text = []
-                        for segment in result["segments"]:
-                            start_time = self.format_timestamp(segment["start"])
-                            end_time = self.format_timestamp(segment["end"])
-                            text = segment["text"].strip()
+                        for segment in segments:
+                            start_time = self.format_timestamp(segment.start)
+                            end_time = self.format_timestamp(segment.end)
+                            text = segment.text.strip()
                             formatted_text.append(f"[{start_time} --> {end_time}] {text}")
                         transcription = "\n".join(formatted_text)
                     else:
-                        transcription = result["text"]
+                        text_parts = [segment.text.strip() for segment in segments]
+                        transcription = " ".join(text_parts).strip()
                     
                     # Save to file in the same directory as the source file
                     output_file = Path(file_path).parent / f"{Path(file_path).stem}_transcription.txt"
@@ -553,6 +613,7 @@ class TranscriptionApp:
             self.queue.put(("button_state", ("pause", tk.DISABLED)))
             self.queue.put(("button_state", ("stop", tk.DISABLED)))
             self.queue.put(("button_state", ("select", tk.NORMAL)))
+            self.queue.put(("device_state", ("readonly", "readonly")))
             self.queue.put(("processing_complete", None))
 
     def select_files(self):
@@ -776,6 +837,10 @@ class TranscriptionApp:
                         self.stop_btn.configure(state=state)
                     elif button == "select":
                         self.select_button.configure(state=state)
+                elif msg_type == "device_state":
+                    device_state, compute_state = msg_data
+                    self.device_combo.configure(state=device_state)
+                    self.compute_combo.configure(state=compute_state)
                 elif msg_type == "processing_complete":
                     # Reset time label since estimates are best-effort
                     self.total_time_label["text"] = "Total estimated time: --:--"
@@ -798,7 +863,101 @@ class TranscriptionApp:
             "medium": "~1.5GB download, ~5GB in memory",
             "large-v3": "~3GB download, ~10GB in memory"
         }
-        self.status_label["text"] = f"Selected model: {model_name} ({model_sizes[model_name]})"
+        device_label = self.device_var.get()
+        compute_label = self.compute_var.get()
+        self.status_label["text"] = (
+            f"Selected model: {model_name} ({model_sizes[model_name]}), "
+            f"{device_label}, {compute_label}"
+        )
+
+    def on_device_change(self, event=None):
+        """Update compute options and time estimates when device changes"""
+        self.refresh_compute_options()
+        self.update_speed_factors()
+        self.refresh_estimates_for_queue()
+        self.show_model_info()
+
+    def on_compute_change(self, event=None):
+        """Update time estimates when compute type changes"""
+        self.update_speed_factors()
+        self.refresh_estimates_for_queue()
+        self.show_model_info()
+
+    def refresh_compute_options(self):
+        """Update compute choices based on the selected device"""
+        device = self.get_selected_device()
+        if device == "cuda":
+            compute_choices = [
+                "Auto (recommended)",
+                "Fast (float16)",
+                "Balanced (int8_float16)",
+                "Memory Saver (int8)",
+                "Precise (float32)"
+            ]
+        else:
+            compute_choices = [
+                "Auto (recommended)",
+                "Memory Saver (int8)",
+                "Precise (float32)"
+            ]
+        current = self.compute_var.get()
+        self.compute_combo["values"] = compute_choices
+        if current not in compute_choices:
+            self.compute_var.set("Auto (recommended)")
+
+    def update_speed_factors(self):
+        """Update model speed estimates based on device/compute selection"""
+        device = self.get_selected_device()
+        compute_type = self.get_selected_compute_type()
+
+        device_multiplier = {
+            "cpu": 1.0,
+            "cuda": 3.5,
+            "auto": 1.0
+        }.get(device, 1.0)
+
+        if device == "cuda":
+            compute_multiplier = {
+                None: 1.0,
+                "float16": 1.2,
+                "int8_float16": 1.1,
+                "int8": 0.9,
+                "float32": 0.85
+            }.get(compute_type, 1.0)
+        else:
+            compute_multiplier = {
+                None: 1.0,
+                "int8": 1.2,
+                "float32": 1.0
+            }.get(compute_type, 1.0)
+
+        scale = device_multiplier * compute_multiplier
+        self.model_speeds = {
+            name: speed * scale for name, speed in self.base_model_speeds.items()
+        }
+
+    def refresh_estimates_for_queue(self):
+        """Recalculate estimates for pending files based on current speed factors"""
+        for item in self.file_list.get_children():
+            values = list(self.file_list.item(item)["values"])
+            if len(values) < 6:
+                continue
+            status = values[1]
+            file_model = values[3]
+            file_path = values[5]
+            if status != "Pending":
+                continue
+            try:
+                duration = librosa.get_duration(path=file_path)
+                total_minutes = int(duration / 60)
+                speed_factor = self.model_speeds[file_model]
+                est_minutes = int((duration / 60) / speed_factor)
+                values[4] = self.format_time_estimate(est_minutes)
+                self.file_list.item(item, values=values)
+            except Exception:
+                values[4] = "--:--"
+                self.file_list.item(item, values=values)
+        self.update_total_time_estimate()
 
     def show_model_info(self):
         """Show information about the selected model"""
@@ -819,16 +978,20 @@ class TranscriptionApp:
             "large-v3": "Best for: Professional use, maximum accuracy, complex audio"
         }
         
-        # Check which models are downloaded using Whisper's cache location
+        # Check which models are downloaded using faster-whisper's cache location
         downloaded_models = []
-        cache_dir = os.path.expanduser("~/.cache/whisper")
         for model in ["tiny", "base", "small", "medium", "large-v3"]:
-            model_path = os.path.join(cache_dir, f"{model}.pt")
-            if os.path.exists(model_path):
+            model_path = self.get_model_cache_dir(model)
+            if os.path.isdir(model_path):
                 downloaded_models.append(model)
         
         # Update status
-        self.status_label["text"] = f"Selected model: {model_name} ({model_sizes[model_name]})"
+        device_label = self.device_var.get()
+        compute_label = self.compute_var.get()
+        self.status_label["text"] = (
+            f"Selected model: {model_name} ({model_sizes[model_name]}), "
+            f"{device_label}, {compute_label}"
+        )
         
         # Only show full info in text area if it's empty
         if not self.text_area.get(1.0, tk.END).strip():
@@ -836,7 +999,9 @@ class TranscriptionApp:
             info_text = f"Selected model: {model_name}\n"
             info_text += f"Size: {model_sizes[model_name]}\n"
             info_text += f"Use case: {model_use_cases[model_name]}\n"
-            info_text += "The model will be downloaded and run locally.\n\n"
+            info_text += f"Device: {device_label}\n"
+            info_text += f"Compute: {compute_label}\n"
+            info_text += "The model will be downloaded and run locally with faster-whisper.\n\n"
             
             # Add downloaded models info
             if downloaded_models:
@@ -896,17 +1061,17 @@ class TranscriptionApp:
         if self.is_processing:
             self.root.after(1000, self.update_remaining_time)
 
-    def load_model(self, model_name):
-        """Load the Whisper model with download status"""
+    def load_model(self, model_name, device=None, compute_type=None):
+        """Load the faster-whisper model with download status"""
         try:
-            # Lazy import whisper to speed up GUI startup
-            import whisper
+            # Lazy import faster-whisper to speed up GUI startup
+            from faster_whisper import WhisperModel
 
-            # Get the model path in Whisper's cache
-            model_path = os.path.expanduser(f"~/.cache/whisper/{model_name}.pt")
+            # Get the model path in faster-whisper's cache
+            model_path = self.get_model_cache_dir(model_name)
 
             # Check if model exists
-            if not os.path.exists(model_path):
+            if not os.path.isdir(model_path):
                 self.queue.put(("show_model_progress", True))
                 self.queue.put(("status", f"Downloading {model_name} model..."))
                 self.queue.put(("text", f"\nDownloading {model_name} model...\nThis is a one-time download. The model will be stored locally at:\n{model_path}\n\n"))
@@ -914,7 +1079,11 @@ class TranscriptionApp:
                 self.queue.put(("model_progress_label", "Starting download..."))
 
             # Load the model
-            model = whisper.load_model(model_name)
+            model = WhisperModel(
+                model_name,
+                device=device or "auto",
+                compute_type=compute_type
+            )
             
             self.queue.put(("model_progress", 100))
             self.queue.put(("model_progress_label", "Complete"))
@@ -1066,6 +1235,19 @@ class TranscriptionApp:
             return True
         except (IOError, OSError):
             return False
+
+    def get_selected_device(self):
+        """Map friendly device label to faster-whisper device string"""
+        return self.device_options.get(self.device_var.get(), "auto")
+
+    def get_selected_compute_type(self):
+        """Map friendly compute label to faster-whisper compute_type"""
+        return self.compute_label_to_type.get(self.compute_var.get())
+
+    def get_model_cache_dir(self, model_name):
+        """Get faster-whisper cache directory for a model"""
+        cache_root = os.path.expanduser("~/.cache/huggingface/hub")
+        return os.path.join(cache_root, f"models--Systran--faster-whisper-{model_name}")
 
 def main():
     root = tk.Tk()
