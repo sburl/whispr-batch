@@ -4,12 +4,18 @@ import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext
 import threading
 from pathlib import Path
-from datetime import timedelta
 import queue
 import os
 import librosa
-from typing import List, Dict
 import time
+
+from audio_transcribe_core import (
+    format_timestamp as core_format_timestamp,
+    load_model as core_load_model,
+    render_plain_text,
+    render_timestamped_text,
+    transcribe_segments,
+)
 import platform
 import sys
 
@@ -589,26 +595,16 @@ class TranscriptionApp:
                     self.queue.put(("transcribe_start", (filename, transcribe_start)))
 
                     # Transcribe file
-                    segments, _info = model.transcribe(
-                        file_path,
-                        task="transcribe"
-                    )
+                    segments, _info = transcribe_segments(model, file_path, task="transcribe")
 
                     # Stop tracking elapsed time
                     self.queue.put(("transcribe_end", None))
                     
                     # After transcription, format with timestamps if needed
                     if include_timestamps:
-                        formatted_text = []
-                        for segment in segments:
-                            start_time = self.format_timestamp(segment.start)
-                            end_time = self.format_timestamp(segment.end)
-                            text = segment.text.strip()
-                            formatted_text.append(f"[{start_time} --> {end_time}] {text}")
-                        transcription = "\n".join(formatted_text)
+                        transcription = render_timestamped_text(segments)
                     else:
-                        text_parts = [segment.text.strip() for segment in segments]
-                        transcription = " ".join(text_parts).strip()
+                        transcription = render_plain_text(segments)
                     
                     # Save to file in the same directory as the source file
                     output_file = Path(file_path).parent / f"{Path(file_path).stem}_transcription.txt"
@@ -1037,7 +1033,7 @@ class TranscriptionApp:
 
     def format_timestamp(self, seconds):
         """Convert seconds to HH:MM:SS format"""
-        return str(timedelta(seconds=round(seconds)))
+        return core_format_timestamp(seconds)
 
     def format_time_estimate(self, minutes):
         """Format time estimate in HH:MM format"""
@@ -1070,9 +1066,6 @@ class TranscriptionApp:
     def load_model(self, model_name, device=None, compute_type=None):
         """Load the faster-whisper model with download status"""
         try:
-            # Lazy import faster-whisper to speed up GUI startup
-            from faster_whisper import WhisperModel
-
             # Get the model path in faster-whisper's cache
             model_path = self.get_model_cache_dir(model_name)
 
@@ -1085,18 +1078,11 @@ class TranscriptionApp:
                 self.queue.put(("model_progress_label", "Starting download..."))
 
             # Load the model
-            # Build keyword arguments only for values the CTranslate2 binding accepts
-            # Force stable CPU/int8 when user selects 'Auto' on macOS arm64 to avoid Metal seg-faults
-            import platform
-            if (device or "auto") == "auto" and platform.system() == "Darwin" and platform.machine() == "arm64":
-                kwargs = {"device": "cpu", "compute_type": "int8"}
-            else:
-                kwargs = {"device": device or "auto"}
-            if compute_type:
-                # Only pass compute_type if the caller set it; None breaks the C++ binding
-                kwargs["compute_type"] = compute_type
-
-            model = WhisperModel(model_name, **kwargs)
+            model = core_load_model(
+                model_name,
+                device=device or "auto",
+                compute_type=compute_type
+            )
             
             self.queue.put(("model_progress", 100))
             self.queue.put(("model_progress_label", "Complete"))

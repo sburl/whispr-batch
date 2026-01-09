@@ -1,40 +1,28 @@
 #!/usr/bin/env python3
 
-import os
 import argparse
 from pathlib import Path
-from faster_whisper import WhisperModel
 
-def format_timestamp(seconds):
-    """Convert seconds to HH:MM:SS format"""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+from audio_transcribe_core import (
+    load_model,
+    transcribe_file,
+)
 
 def transcribe_audio(file_path, model_name="large-v3", include_timestamps=True, model=None):
     """Transcribe audio file using faster-whisper"""
     # Allow caller to supply a pre-loaded model so we don't reload per file
-    model = model or WhisperModel(model_name, device="auto")
+    model = model or load_model(model_name, device="auto")
     
     print(f"Transcribing: {file_path}")
-    segments, _info = model.transcribe(
+    result = transcribe_file(
         str(file_path),
+        model_name=model_name,
+        include_timestamps=include_timestamps,
+        device="auto",
+        model=model,
         task="transcribe"
     )
-    
-    if include_timestamps:
-        # Format with timestamps
-        formatted_text = []
-        for segment in segments:
-            start_time = format_timestamp(segment.start)
-            end_time = format_timestamp(segment.end)
-            text = segment.text.strip()
-            formatted_text.append(f"[{start_time} --> {end_time}] {text}")
-        return "\n".join(formatted_text)
-    else:
-        text_parts = [segment.text.strip() for segment in segments]
-        return " ".join(text_parts).strip()
+    return result.text
 
 def process_directory(directory_path, model_name="large-v3", include_timestamps=True):
     """Process all audio files in the given directory"""
@@ -46,7 +34,7 @@ def process_directory(directory_path, model_name="large-v3", include_timestamps=
     
     # Load the model once for the entire run to avoid repeated downloads and RAM spikes
     print(f"Loading faster-whisper model: {model_name}")
-    model = WhisperModel(model_name, device="auto")
+    model = load_model(model_name, device="auto")
     
     # Create output directory
     output_dir = directory / "transcriptions"

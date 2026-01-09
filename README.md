@@ -65,6 +65,32 @@ python transcribe_audio.py /path/to/folder --model base
 
 ---
 
+## Core Package
+
+The non-GUI transcription utilities live in `audio_transcribe_core/`. Install locally:
+
+```bash
+pip install -e .
+```
+
+Example usage:
+
+```python
+from audio_transcribe_core import transcribe_file
+
+result = transcribe_file("path/to/audio.wav", model_name="base")
+text = result.text
+```
+
+API options:
+- `model_name`: model size such as `tiny`, `base`, `small`, `medium`, `large-v3`
+- `device`: `auto`, `cpu`, or `cuda`
+- `compute_type`: `float16`, `int8_float16`, `int8`, or `float32`
+- `include_timestamps`: include segment timestamps in the output text
+- `task`: `transcribe` or `translate`
+
+---
+
 ## Troubleshooting
 | Issue | Fix |
 |-------|-----|
