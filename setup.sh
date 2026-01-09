@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-platform setup script for WhisprBatch
+# Cross-platform setup script for WhisperBatch
 #  • Creates a virtual environment using the default python3 on the system
 #  • Installs dependencies from requirements.txt
 #  • Ensures the correct PyTorch wheel is installed for Apple-Silicon macOS

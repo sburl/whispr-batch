@@ -47,7 +47,7 @@ _check_pytorch_arch()
 class TranscriptionApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio Transcription")
+        self.root.title("WhisperBatch")
         self.root.geometry("1000x800")
         
         # Create message queue for thread-safe updates
