@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from audio_transcribe_core import (
+from whisper_batch_core import (
     load_model,
     transcribe_file,
 )

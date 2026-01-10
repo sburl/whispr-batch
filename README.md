@@ -67,7 +67,7 @@ python transcribe_audio.py /path/to/folder --model base
 
 ## Core Package
 
-The non-GUI transcription utilities live in `audio_transcribe_core/`. Install locally:
+The non-GUI transcription utilities live in `whisper_batch_core/`. Install locally:
 
 ```bash
 pip install -e .
@@ -76,7 +76,7 @@ pip install -e .
 Example usage:
 
 ```python
-from audio_transcribe_core import transcribe_file
+from whisper_batch_core import transcribe_file
 
 result = transcribe_file("path/to/audio.wav", model_name="base")
 text = result.text

@@ -9,7 +9,7 @@ import os
 import librosa
 import time
 
-from audio_transcribe_core import (
+from whisper_batch_core import (
     format_timestamp as core_format_timestamp,
     load_model as core_load_model,
     render_plain_text,

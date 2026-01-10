@@ -3,11 +3,11 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "audio-transcribe-core"
+name = "whisper-batch-core"
 version = "0.1.0"
 description = "Core transcription utilities for faster-whisper"
 requires-python = ">=3.8"
 dependencies = ["faster-whisper>=1.0.3"]
 
 [tool.setuptools]
-packages = ["audio_transcribe_core"]
+packages = ["whisper_batch_core"]
