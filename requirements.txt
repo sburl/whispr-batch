@@ -1,5 +1,5 @@
 faster-whisper>=1.2.1
-numpy>=1.24.3
+numpy>=2.2.6
 tqdm>=4.66.1
 requests>=2.31.0
 librosa>=0.10.1
