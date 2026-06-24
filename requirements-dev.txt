@@ -1,5 +1,5 @@
 -r requirements.txt
 pytest>=7.0
-ruff>=0.15.13,<1
+ruff>=0.15.17,<1
 bandit>=1.7,<2
 pip-audit>=2.9.0,<3
